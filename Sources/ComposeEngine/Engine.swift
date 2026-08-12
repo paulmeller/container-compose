@@ -12,7 +12,11 @@ import Foundation
 /// `EngineEvent`s and lets every consumer (CLI, GUI, test) decide what to do
 /// with them.
 public actor Engine {
-    private let adapter: RuntimeAdapter
+    // `internal` (the default), not `private`: EngineLifecycle.swift extends
+    // this actor from a separate file and needs to reach the adapter too.
+    // Still not `public` — nothing outside this module should call the
+    // adapter directly and bypass Engine's orchestration.
+    let adapter: RuntimeAdapter
 
     public init(adapter: RuntimeAdapter) {
         self.adapter = adapter
