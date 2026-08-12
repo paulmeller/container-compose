@@ -207,6 +207,54 @@ struct ProtocolRequestParsingTests {
     }
 }
 
+@Suite("ProtocolRequest.extractFormat")
+struct ExtractFormatTests {
+
+    @Test("defaults to text when --format is absent")
+    func defaultsToText() throws {
+        let (format, remaining) = try ProtocolRequest.extractFormat(["up", "--file", "c.yml"])
+        #expect(format == .text)
+        #expect(remaining == ["up", "--file", "c.yml"])
+    }
+
+    @Test("--format ndjson is recognized and removed from the remaining argv")
+    func recognizesNdjson() throws {
+        let (format, remaining) = try ProtocolRequest.extractFormat(["--format", "ndjson", "up", "--file", "c.yml"])
+        #expect(format == .ndjson)
+        #expect(remaining == ["up", "--file", "c.yml"])
+    }
+
+    @Test("--format works regardless of where it appears in argv")
+    func positionIndependent() throws {
+        let (format, remaining) = try ProtocolRequest.extractFormat(["up", "--file", "c.yml", "--format", "ndjson"])
+        #expect(format == .ndjson)
+        #expect(remaining == ["up", "--file", "c.yml"])
+    }
+
+    @Test("the remaining argv still parses correctly as a command after extraction")
+    func remainingArgvStillParses() throws {
+        let (format, remaining) = try ProtocolRequest.extractFormat(["--format", "ndjson", "up", "--file", "c.yml", "web"])
+        #expect(format == .ndjson)
+        let request = try ProtocolRequest.parse(remaining)
+        #expect(request.command == .up(services: ["web"]))
+        #expect(request.composeFilePath == "c.yml")
+    }
+
+    @Test("--format with a missing value is rejected")
+    func missingValue() throws {
+        #expect(throws: ProtocolRequest.ParseError.missingValue(forFlag: "--format")) {
+            _ = try ProtocolRequest.extractFormat(["up", "--format"])
+        }
+    }
+
+    @Test("--format with an unrecognized value is rejected")
+    func invalidValue() throws {
+        #expect(throws: ProtocolRequest.ParseError.invalidArgument(command: "up", name: "--format", value: "yaml")) {
+            _ = try ProtocolRequest.extractFormat(["up", "--format", "yaml"])
+        }
+    }
+}
+
 @Suite("ProtocolMessage wire mapping")
 struct ProtocolMessageMappingTests {
 

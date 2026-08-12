@@ -90,6 +90,47 @@ public struct ProtocolRequest: Sendable, Equatable {
         }
     }
 
+    /// How `container-compose` should render its output — human-readable
+    /// text (the default, for a terminal) or one NDJSON `ProtocolMessage`
+    /// per line (for a non-Swift consumer like Port Authority spawning this
+    /// same binary). Never auto-detected from `isatty`: a script piping to
+    /// `jq` must get the same output whether run interactively or in CI, so
+    /// the format is only ever what `--format` explicitly says.
+    public enum OutputFormat: String, Sendable {
+        case text
+        case ndjson
+    }
+
+    /// Extracts a global `--format text|ndjson` from `arguments`, wherever
+    /// it appears, returning the requested format (`.text` if absent) and
+    /// the remaining argv for `parse`.
+    ///
+    /// Deliberately a separate pass, not a case inside `parse`'s per-command
+    /// switch: which renderer to use is a property of how the CLI presents
+    /// a result, orthogonal to what operation `parse` resolves — every
+    /// command accepts `--format` uniformly this way, rather than each of
+    /// `parse`'s ~25 command cases needing to know about a flag that means
+    /// nothing to the operation itself.
+    public static func extractFormat(_ arguments: [String]) throws -> (format: OutputFormat, remaining: [String]) {
+        var format: OutputFormat = .text
+        var remaining: [String] = []
+        var rest = arguments
+        while !rest.isEmpty {
+            let token = rest.removeFirst()
+            guard token == "--format" else {
+                remaining.append(token)
+                continue
+            }
+            guard !rest.isEmpty else { throw ParseError.missingValue(forFlag: "--format") }
+            let value = rest.removeFirst()
+            guard let parsed = OutputFormat(rawValue: value) else {
+                throw ParseError.invalidArgument(command: arguments.first ?? "", name: "--format", value: value)
+            }
+            format = parsed
+        }
+        return (format, remaining)
+    }
+
     /// Parses argv (excluding the executable name at index 0).
     ///
     /// Hand-rolled rather than a dependency: the surface is fixed and this is

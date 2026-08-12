@@ -11,9 +11,8 @@ let package = Package(
         .library(name: "ComposeEngine", targets: ["ComposeEngine"]),
         .library(name: "ComposeContainerRuntime", targets: ["ComposeContainerRuntime"]),
         .library(name: "ComposeProtocol", targets: ["ComposeProtocol"]),
-        .executable(name: "container-compose-protocol", targets: ["container-compose-protocol"]),
         .library(name: "ComposeCLIKit", targets: ["ComposeCLIKit"]),
-        .executable(name: "container-compose-cli", targets: ["container-compose-cli"]),
+        .executable(name: "container-compose", targets: ["container-compose"]),
     ],
     dependencies: [
         .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.0")
@@ -90,20 +89,10 @@ let package = Package(
             dependencies: ["ComposeProtocol", "ComposeTestSupport"]
         ),
 
-        // The actual binary a non-Swift process (Port Authority, in Zig)
-        // spawns. Deliberately thin: argv parsing and NDJSON writing only —
-        // every decision of substance lives in ComposeProtocol, where it is
-        // unit-testable without spawning a process at all.
-        .executableTarget(
-            name: "container-compose-protocol",
-            dependencies: ["ComposeProtocol", "ComposeContainerRuntime"]
-        ),
-
-        // Formats a ProtocolMessage stream as human-readable lines. This is
-        // the entire delta between the CLI and the protocol binary: same
-        // request parsing, same runner, different rendering. Its own library
-        // target so the formatting logic is unit-testable without a process
-        // or a daemon, same as every other layer.
+        // Formats a ProtocolMessage stream as human-readable lines — the
+        // `--format text` path. Its own library target so the formatting
+        // logic is unit-testable without a process or a daemon, same as
+        // every other layer.
         .target(
             name: "ComposeCLIKit",
             dependencies: ["ComposeCore", "ComposeProtocol"]
@@ -113,13 +102,17 @@ let package = Package(
             dependencies: ["ComposeCLIKit", "ComposeCore", "ComposeProtocol"]
         ),
 
-        // The human-facing binary. Calls the identical ProtocolRequest.parse
-        // and ProtocolRunner that container-compose-protocol uses — proof
-        // by construction that this consumer has no access the protocol
-        // layer does not expose, which is the design's central discipline
-        // for this layer.
+        // The one binary: a human terminal and a non-Swift process (Port
+        // Authority, in Zig, spawning `container-compose --format ndjson
+        // ...`) are both just callers with a different `--format`, not two
+        // separate build targets — see `ProtocolRequest.extractFormat`'s
+        // doc comment for why that used to be two binaries and isn't
+        // anymore. Deliberately thin regardless: argv parsing and picking a
+        // renderer only — every decision of substance lives in
+        // ComposeProtocol, where it is unit-testable without spawning a
+        // process at all.
         .executableTarget(
-            name: "container-compose-cli",
+            name: "container-compose",
             dependencies: ["ComposeProtocol", "ComposeContainerRuntime", "ComposeCLIKit"]
         ),
     ]

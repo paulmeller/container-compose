@@ -25,21 +25,25 @@ Sources/
                                that needs to drive Engine without a daemon.
   ComposeProtocol/             the wire contract: ProtocolMessage (flat, tagged,
                                NOT a serialization of EngineEvent's Swift
-                               shape) and ProtocolRunner, which resolves a
-                               request into a Plan and executes it.
-  container-compose-protocol/ the actual binary a non-Swift process spawns.
-                               ~30 lines: argv -> ProtocolRequest, print each
-                               ProtocolMessage as one NDJSON line, exit code
+                               shape), ProtocolRunner (resolves a request into
+                               a Plan and executes it), and
+                               ProtocolRequest.extractFormat (the global
+                               `--format text|ndjson` flag, order-independent,
+                               parsed separately from the per-command argv).
+  ComposeCLIKit/               formats a ProtocolMessage stream as human-
+                               readable text — the `--format text` path.
+  container-compose/          the one binary. ~40 lines: argv -> a format
+                               plus a ProtocolRequest, run it, print each
+                               ProtocolMessage either as NDJSON or through
+                               CLIRenderer depending on `--format`, exit code
                                from the runner. Line-buffered explicitly —
                                block buffering would turn "streaming" into
-                               "dumped at exit".
-  ComposeCLIKit/               formats the same message stream as human-
-                               readable text. The only code that exists
-                               purely for the CLI.
-  container-compose-cli/      the human CLI. Calls the IDENTICAL
-                               ProtocolRequest.parse / ProtocolRunner the
-                               protocol binary uses — proof by construction
-                               that it has no capability the protocol lacks.
+                               "dumped at exit". A human terminal and a
+                               non-Swift process (Port Authority) are both
+                               just callers of this SAME binary with a
+                               different flag, not two build targets —
+                               proof by construction that `--format text`
+                               has no capability `--format ndjson` lacks.
 Tests/
   ComposeCoreTests/            76 tests, ~15ms. No daemon — includes a
                                real-filesystem suite (temp dirs, no
@@ -85,10 +89,10 @@ That claim is provable in layers:
   independently against `container ls`.
 - The same claim is verified a second time across the actual process
   boundary the project exists to serve: a plain Python script (no Swift, no
-  shared code) spawns `container-compose-protocol`, parses NDJSON line by
-  line, and asserts `reused: true` on the second `up`. This is the proof
-  that matters for the motivating case — Port Authority is Zig and cannot
-  link a Swift library at all.
+  shared code) spawns `container-compose --format ndjson`, parses NDJSON
+  line by line, and asserts `reused: true` on the second `up`. This is the
+  proof that matters for the motivating case — Port Authority is Zig and
+  cannot link a Swift library at all.
 
 ## Building and testing
 
@@ -102,21 +106,22 @@ swift test --filter "ComposeContainerRuntimeLiveTests"                          
 
 ```sh
 swift build
-.build/debug/container-compose-cli capabilities
-.build/debug/container-compose-cli up --file compose.yml --project myapp
-.build/debug/container-compose-cli up --file compose.yml --project myapp   # run again: reports "reused", touches nothing
-.build/debug/container-compose-cli ps --file compose.yml --project myapp
-.build/debug/container-compose-cli logs --file compose.yml --project myapp --follow web
-.build/debug/container-compose-cli exec --file compose.yml --project myapp web sh
-.build/debug/container-compose-cli down --file compose.yml --project myapp --remove
+.build/debug/container-compose capabilities
+.build/debug/container-compose up --file compose.yml --project myapp
+.build/debug/container-compose up --file compose.yml --project myapp   # run again: reports "reused", touches nothing
+.build/debug/container-compose ps --file compose.yml --project myapp
+.build/debug/container-compose logs --file compose.yml --project myapp --follow web
+.build/debug/container-compose exec --file compose.yml --project myapp web sh
+.build/debug/container-compose down --file compose.yml --project myapp --remove
 ```
 
-`container-compose-protocol` takes the identical arguments and emits one
-JSON object per line on stdout instead of formatted text — that is the
-entire difference between the two binaries, with one deliberate exception:
-`exec`/`run` inherit the calling process's stdio directly on both binaries,
-since a live terminal session cannot be expressed as line-delimited JSON
-without breaking it — documented at `RuntimeAdapter.execPassthrough`.
+Add `--format ndjson` (anywhere in argv, before or after the subcommand) to
+get one JSON object per line on stdout instead of formatted text — that is
+the entire difference `--format` makes, with one deliberate exception:
+`exec`/`run` inherit the calling process's stdio directly regardless of
+`--format`, since a live terminal session cannot be expressed as
+line-delimited JSON without breaking it — documented at
+`RuntimeAdapter.execPassthrough`.
 
 ## Command surface
 
@@ -145,11 +150,14 @@ syncs-and-restarts, or rebuilds-and-recreates per rule.
 
 Core, Engine, the real adapter, the protocol layer and a CLI all exist and
 are tested end to end, including from a genuinely non-Swift consumer, with
-the full command surface above wired through every layer. Known gaps, stated
-rather than hidden:
-
-- No Port Authority integration yet — the last item in the design doc's
-  sequencing, and the real test of whether any of this was shaped correctly.
+the full command surface above wired through every layer. Port Authority
+(the Zig GUI that motivated the protocol layer in the first place) has a
+Projects section that spawns `container-compose --format ndjson` and drives
+it — the last item in the design doc's sequencing, and the real test of
+whether any of this was shaped correctly. It lives on a branch there, not
+yet merged or visually verified interactively (only through its own test
+suite and a clean process launch), since that verification happens in that
+project's own repo.
 
 ## Provenance
 
