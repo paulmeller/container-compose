@@ -246,4 +246,58 @@ struct ReconciliationLiveTests {
         }.first
         #expect(reused == false)
     }
+
+    @Test("A runPassthrough container is invisible to observe(), even though it shares the managed container's labels")
+    func runPassthroughContainerIsExcludedFromObserve() async throws {
+        // Regression: caught live — `run web ...` stamped the SAME project +
+        // service labels as the real managed "web" container, so `observe()`
+        // returned both, and callers like `export`/`cp`/`port` (which just
+        // take `.first(where: { $0.service == name })`) could resolve to
+        // whichever one the runtime happened to list first — including the
+        // one-off container after `--rm` had already deleted it.
+        guard Self.daemonAvailable else {
+            print("Skipping: `container` daemon is not available.")
+            return
+        }
+
+        let projectName = "cc-live-\(UUID().uuidString.prefix(8))"
+        let containerName = "\(projectName)-app"
+        cleanUp(containerName: containerName)
+        defer { cleanUp(containerName: containerName) }
+
+        let adapter = ContainerRuntimeAdapter()
+        let result = try plan("""
+            services:
+              app:
+                image: alpine:latest
+                command: ["sleep", "120"]
+            """, projectName: projectName)
+        _ = await Engine(adapter: adapter).up(result)
+
+        let exitCode = try await adapter.runPassthrough(
+            image: "alpine:latest",
+            command: ["true"],
+            environment: [:],
+            workingDirectory: nil,
+            labels: ["com.docker.compose.project": projectName, "com.docker.compose.service": "app"],
+            remove: false,
+            tty: false
+        )
+        #expect(exitCode == 0)
+
+        let observed = try await adapter.observe(projectName: projectName)
+        #expect(observed.count == 1, "the one-off container must not appear alongside the managed one")
+        #expect(observed.first?.containerID == containerName)
+
+        // Best-effort cleanup of the one-off container itself — it is not
+        // named `containerName`, so the shared `cleanUp` helper cannot reach
+        // it. Not asserted on: cleanup failing must not fail the test.
+        let listing = try? ContainerCLI.run(["ls", "--all", "--format", "json"])
+        if let stdout = listing?.stdout, let data = stdout.data(using: .utf8),
+           let entries = try? JSONDecoder().decode([WireContainerEntry].self, from: data) {
+            for entry in entries where entry.configuration.labels?[ContainerRuntimeAdapter.oneOffLabel] == "True" {
+                _ = try? ContainerCLI.run(["delete", "--force", entry.configuration.id])
+            }
+        }
+    }
 }

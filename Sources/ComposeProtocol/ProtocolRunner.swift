@@ -14,10 +14,30 @@ import Foundation
 /// this runner's messages onto stdout as NDJSON — so everything of actual
 /// decision weight is unit-testable without spawning a process, exactly like
 /// Core and Engine.
+///
+/// Commands split two ways, matching the design's command-routing decision:
+/// Engine-owned commands (`up`/`down`/`build`/`pull`/`push`/`start`/`stop`/
+/// `restart`/`kill`/`rm`/`wait`) need Reconciler and/or concurrent
+/// multi-service orchestration with the typed event stream, so they go
+/// through `Engine`. Everything else (`ps`/`ls`/`images`/`port`/`config`/
+/// `logs`/`exec`/`cp`/`top`/`stats`/`watch`) acts on already-existing single
+/// containers or is pure observation, and calls the adapter directly —
+/// routing it through Engine's reconcile-and-wave machinery would buy
+/// nothing and cost a layer of indirection.
+///
+/// `exec`/`run` are the one deliberate exception to the message-stream
+/// contract: `run(_:onMessage:)` never produces a `.exec`/`.run` case (see
+/// `runPassthrough`, a separate entry point `main.swift` calls instead).
 public struct ProtocolRunner: Sendable {
     private let adapter: RuntimeAdapter
     private let capabilities: RuntimeCapabilities
     private let files: ComposeFileProvider
+
+    private static let jsonEncoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return encoder
+    }()
 
     public init(
         adapter: RuntimeAdapter,
@@ -32,6 +52,9 @@ public struct ProtocolRunner: Sendable {
     /// Runs `request`, calling `onMessage` for each line as it is produced —
     /// not batched at the end, so a consumer streaming this to a UI sees real
     /// progress. Returns the process exit code the caller should use.
+    ///
+    /// Never called for `.exec`/`.run` — those go through `runPassthrough`
+    /// instead, since they bypass this message stream entirely.
     public func run(_ request: ProtocolRequest, onMessage: @escaping @Sendable (ProtocolMessage) -> Void) async -> Int32 {
         switch request.command {
         case .capabilities:
@@ -43,8 +66,150 @@ public struct ProtocolRunner: Sendable {
 
         case .down(let remove):
             return await runDown(request, remove: remove, onMessage: onMessage)
+
+        case .build(let services):
+            return await runPlanOperation(request, services: services, onMessage: onMessage) { engine, plan, onEvent in
+                await engine.build(plan, onEvent: onEvent)
+            }
+
+        case .pull(let services):
+            return await runPlanOperation(request, services: services, onMessage: onMessage) { engine, plan, onEvent in
+                await engine.pull(plan, onEvent: onEvent)
+            }
+
+        case .push(let services):
+            return await runPlanOperation(request, services: services, onMessage: onMessage) { engine, plan, onEvent in
+                await engine.push(plan, onEvent: onEvent)
+            }
+
+        case .start(let services):
+            return await runLifecycle(request, onMessage: onMessage) { engine, projectName, onEvent in
+                await engine.start(projectName: projectName, services: services, onEvent: onEvent)
+            }
+
+        case .stop(let services):
+            return await runLifecycle(request, onMessage: onMessage) { engine, projectName, onEvent in
+                await engine.stop(projectName: projectName, services: services, onEvent: onEvent)
+            }
+
+        case .restart(let services):
+            return await runLifecycle(request, onMessage: onMessage) { engine, projectName, onEvent in
+                await engine.restart(projectName: projectName, services: services, onEvent: onEvent)
+            }
+
+        case .kill(let services, let signal):
+            return await runLifecycle(request, onMessage: onMessage) { engine, projectName, onEvent in
+                await engine.kill(projectName: projectName, services: services, signal: signal, onEvent: onEvent)
+            }
+
+        case .rm(let services, let force):
+            return await runLifecycle(request, onMessage: onMessage) { engine, projectName, onEvent in
+                await engine.rm(projectName: projectName, services: services, force: force, onEvent: onEvent)
+            }
+
+        case .wait(let services, let timeoutSeconds):
+            return await runLifecycle(request, onMessage: onMessage) { engine, projectName, onEvent in
+                await engine.wait(projectName: projectName, services: services, timeoutSeconds: timeoutSeconds, onEvent: onEvent)
+            }
+
+        case .ps(let all):
+            return await runPs(request, all: all, onMessage: onMessage)
+
+        case .ls(let all):
+            return await runLs(all: all, onMessage: onMessage)
+
+        case .images:
+            return await runImages(request, onMessage: onMessage)
+
+        case .config:
+            return runConfig(request, onMessage: onMessage)
+
+        case .logs(let services, let follow, let tail):
+            return await runLogs(request, services: services, follow: follow, tail: tail, onMessage: onMessage)
+
+        case .top(let services):
+            return await runTop(request, services: services, onMessage: onMessage)
+
+        case .stats(let services):
+            return await runStats(request, services: services, onMessage: onMessage)
+
+        case .port(let service, let containerPort):
+            return await runPort(request, service: service, containerPort: containerPort, onMessage: onMessage)
+
+        case .cp(let source, let destination):
+            return await runCp(request, source: source, destination: destination, onMessage: onMessage)
+
+        case .export(let service, let outputPath):
+            return await runExport(request, service: service, outputPath: outputPath, onMessage: onMessage)
+
+        case .watch(let services):
+            return await runWatch(request, services: services, onMessage: onMessage)
+
+        case .exec, .run:
+            // Programmer error: main.swift must route these to
+            // `runPassthrough` before ever reaching this switch.
+            onMessage(.errorMessage("exec/run do not use the message stream"))
+            return 1
         }
     }
+
+    /// The passthrough entry point for `.exec`/`.run` — inherited-stdio
+    /// process execution with no NDJSON emitted at all, per
+    /// `RuntimeAdapter.execPassthrough`'s documented exception. `main.swift`
+    /// calls this instead of `run(_:onMessage:)` when it sees either command,
+    /// and writes any resolution error to stderr itself (there is no message
+    /// stream for it to go on).
+    public func runPassthrough(_ request: ProtocolRequest) async -> (exitCode: Int32, error: String?) {
+        switch request.command {
+        case .exec(let service, let command, let tty):
+            guard let projectName = resolveProjectNamePlain(request) else {
+                return (1, "a project name or a compose file is required")
+            }
+            guard let observed = try? await adapter.observe(projectName: projectName),
+                  let container = observed.first(where: { $0.service == service }) else {
+                return (1, "no container for service '\(service)' in project '\(projectName)'")
+            }
+            let exitCode = (try? await adapter.execPassthrough(containerID: container.containerID, command: command, tty: tty)) ?? 127
+            return (exitCode, nil)
+
+        case .run(let service, let command, let remove, let tty):
+            guard let plan = resolvePlanPlain(request, requestedServices: [service]) else {
+                return (1, "failed to resolve a plan for service '\(service)'")
+            }
+            guard let planned = plan.service(named: service) else {
+                return (1, "no such service '\(service)'")
+            }
+            do {
+                let image: String
+                if let explicit = planned.image {
+                    try await adapter.ensureImage(explicit)
+                    image = explicit
+                } else {
+                    image = try await adapter.buildImage(for: planned, projectName: plan.projectName)
+                }
+                let exitCode = try await adapter.runPassthrough(
+                    image: image,
+                    command: command,
+                    environment: planned.environment,
+                    workingDirectory: nil,
+                    labels: [
+                        "com.docker.compose.project": plan.projectName,
+                        "com.docker.compose.service": planned.name,
+                    ],
+                    remove: remove,
+                    tty: tty
+                )
+                return (exitCode, nil)
+            } catch {
+                return (1, "\(error)")
+            }
+
+        default:
+            return (1, "runPassthrough called for a non-passthrough command")
+        }
+    }
+
+    // MARK: - Engine-owned: up/down
 
     private func runUp(_ request: ProtocolRequest, services: [String], onMessage: @escaping @Sendable (ProtocolMessage) -> Void) async -> Int32 {
         guard let plan = resolvePlan(request, requestedServices: services, onMessage: onMessage) else { return 1 }
@@ -66,6 +231,426 @@ public struct ProtocolRunner: Sendable {
 
         guard case .done(let success, _, _, _) = events.last else { return 1 }
         return success ? 0 : 1
+    }
+
+    // MARK: - Engine-owned: build/pull/push
+
+    /// Shared shape for the three whole-plan, no-container-lifecycle
+    /// operations: resolve a plan, hand it to one `Engine` method, translate
+    /// its terminal `.done` event into an exit code.
+    private func runPlanOperation(
+        _ request: ProtocolRequest,
+        services: [String],
+        onMessage: @escaping @Sendable (ProtocolMessage) -> Void,
+        operation: @escaping @Sendable (Engine, Plan, @escaping @Sendable (EngineEvent) -> Void) async -> [EngineEvent]
+    ) async -> Int32 {
+        guard let plan = resolvePlan(request, requestedServices: services, onMessage: onMessage) else { return 1 }
+        let engine = Engine(adapter: adapter)
+        let events = await operation(engine, plan) { event in onMessage(ProtocolMessage(event)) }
+        guard case .done(let success, _, _, _) = events.last else { return 1 }
+        return success ? 0 : 1
+    }
+
+    // MARK: - Engine-owned: start/stop/restart/kill/rm/wait
+
+    /// Shared shape for the six already-created-container operations: none
+    /// need a compose file, only a resolved project name (matching `down`).
+    private func runLifecycle(
+        _ request: ProtocolRequest,
+        onMessage: @escaping @Sendable (ProtocolMessage) -> Void,
+        operation: @escaping @Sendable (Engine, String, @escaping @Sendable (EngineEvent) -> Void) async -> [EngineEvent]
+    ) async -> Int32 {
+        guard let projectName = resolveProjectName(request, onMessage: onMessage) else { return 1 }
+        let engine = Engine(adapter: adapter)
+        let events = await operation(engine, projectName) { event in onMessage(ProtocolMessage(event)) }
+        guard case .done(let success, _, _, _) = events.last else { return 1 }
+        return success ? 0 : 1
+    }
+
+    // MARK: - Direct-to-adapter: observation
+
+    private func runPs(_ request: ProtocolRequest, all: Bool, onMessage: @escaping @Sendable (ProtocolMessage) -> Void) async -> Int32 {
+        guard let projectName = resolveProjectName(request, onMessage: onMessage) else { return 1 }
+        guard let observed = try? await adapter.observe(projectName: projectName) else {
+            onMessage(.errorMessage("failed to observe containers for project '\(projectName)'"))
+            return 1
+        }
+        let rows = all ? observed : observed.filter { $0.running }
+        for row in rows.sorted(by: { $0.service < $1.service }) {
+            onMessage(.containerMessage(row))
+        }
+        return 0
+    }
+
+    private func runLs(all: Bool, onMessage: @escaping @Sendable (ProtocolMessage) -> Void) async -> Int32 {
+        guard let observed = try? await adapter.observeAllProjects() else {
+            onMessage(.errorMessage("failed to observe containers"))
+            return 1
+        }
+        let rows = all ? observed : observed.filter { $0.running }
+        for row in rows.sorted(by: { ($0.project, $0.service) < ($1.project, $1.service) }) {
+            onMessage(.containerMessage(row))
+        }
+        return 0
+    }
+
+    private func runImages(_ request: ProtocolRequest, onMessage: @escaping @Sendable (ProtocolMessage) -> Void) async -> Int32 {
+        guard let projectName = resolveProjectName(request, onMessage: onMessage) else { return 1 }
+        guard let observed = try? await adapter.observe(projectName: projectName) else {
+            onMessage(.errorMessage("failed to observe containers for project '\(projectName)'"))
+            return 1
+        }
+        for row in observed.sorted(by: { $0.service < $1.service }) {
+            onMessage(.containerMessage(row))
+        }
+        return 0
+    }
+
+    private func runConfig(_ request: ProtocolRequest, onMessage: @escaping @Sendable (ProtocolMessage) -> Void) -> Int32 {
+        guard let plan = resolvePlan(request, requestedServices: [], onMessage: onMessage) else { return 1 }
+        guard let data = try? Self.jsonEncoder.encode(plan), let text = String(data: data, encoding: .utf8) else {
+            onMessage(.errorMessage("failed to render the resolved plan"))
+            return 1
+        }
+        onMessage(.configMessage(text))
+        return 0
+    }
+
+    private func runLogs(
+        _ request: ProtocolRequest,
+        services: [String],
+        follow: Bool,
+        tail: Int?,
+        onMessage: @escaping @Sendable (ProtocolMessage) -> Void
+    ) async -> Int32 {
+        guard let projectName = resolveProjectName(request, onMessage: onMessage) else { return 1 }
+        guard let observed = try? await adapter.observe(projectName: projectName) else {
+            onMessage(.errorMessage("failed to observe containers for project '\(projectName)'"))
+            return 1
+        }
+        let targeted = services.isEmpty ? observed : observed.filter { services.contains($0.service) }
+        guard !targeted.isEmpty else {
+            onMessage(.errorMessage("no matching containers in project '\(projectName)'"))
+            return 1
+        }
+
+        await withTaskGroup(of: Void.self) { group in
+            for container in targeted {
+                group.addTask {
+                    try? await adapter.streamLogs(containerID: container.containerID, follow: follow, tail: tail) { line in
+                        onMessage(.logMessage(service: container.service, line: line))
+                    }
+                }
+            }
+            await group.waitForAll()
+        }
+        return 0
+    }
+
+    private func runTop(_ request: ProtocolRequest, services: [String], onMessage: @escaping @Sendable (ProtocolMessage) -> Void) async -> Int32 {
+        guard let projectName = resolveProjectName(request, onMessage: onMessage) else { return 1 }
+        guard let observed = try? await adapter.observe(projectName: projectName) else {
+            onMessage(.errorMessage("failed to observe containers for project '\(projectName)'"))
+            return 1
+        }
+        let targeted = services.isEmpty ? observed : observed.filter { services.contains($0.service) }
+        guard !targeted.isEmpty else {
+            onMessage(.errorMessage("no matching containers in project '\(projectName)'"))
+            return 1
+        }
+
+        var succeeded = true
+        for container in targeted.sorted(by: { $0.service < $1.service }) {
+            do {
+                let text = try await adapter.topProcesses(containerID: container.containerID)
+                onMessage(.outputMessage(service: container.service, text: text))
+            } catch {
+                onMessage(.errorMessage("\(container.service): \(error)"))
+                succeeded = false
+            }
+        }
+        return succeeded ? 0 : 1
+    }
+
+    private func runStats(_ request: ProtocolRequest, services: [String], onMessage: @escaping @Sendable (ProtocolMessage) -> Void) async -> Int32 {
+        guard let projectName = resolveProjectName(request, onMessage: onMessage) else { return 1 }
+        guard let observed = try? await adapter.observe(projectName: projectName) else {
+            onMessage(.errorMessage("failed to observe containers for project '\(projectName)'"))
+            return 1
+        }
+        let targeted = services.isEmpty ? observed : observed.filter { services.contains($0.service) }
+        guard !targeted.isEmpty else {
+            onMessage(.errorMessage("no matching containers in project '\(projectName)'"))
+            return 1
+        }
+
+        do {
+            let text = try await adapter.containerStats(containerIDs: targeted.map(\.containerID))
+            onMessage(.outputMessage(text: text))
+            return 0
+        } catch {
+            onMessage(.errorMessage("\(error)"))
+            return 1
+        }
+    }
+
+    private func runPort(
+        _ request: ProtocolRequest,
+        service: String,
+        containerPort: Int,
+        onMessage: @escaping @Sendable (ProtocolMessage) -> Void
+    ) async -> Int32 {
+        guard let projectName = resolveProjectName(request, onMessage: onMessage) else { return 1 }
+        guard let observed = try? await adapter.observe(projectName: projectName),
+              let container = observed.first(where: { $0.service == service }) else {
+            onMessage(.errorMessage("no container for service '\(service)' in project '\(projectName)'"))
+            return 1
+        }
+        guard let binding = container.publishedPorts.first(where: { $0.containerPort == containerPort }) else {
+            onMessage(.errorMessage("service '\(service)' does not publish container port \(containerPort)"))
+            return 1
+        }
+        onMessage(ProtocolMessage(
+            type: .container,
+            service: service,
+            container: container.containerID,
+            project: projectName,
+            image: container.image,
+            ports: [binding.wireFormat]
+        ))
+        return 0
+    }
+
+    // MARK: - Direct-to-adapter: files
+
+    private func runCp(
+        _ request: ProtocolRequest,
+        source: String,
+        destination: String,
+        onMessage: @escaping @Sendable (ProtocolMessage) -> Void
+    ) async -> Int32 {
+        guard let resolvedSource = await resolveCopyEndpoint(source, request: request, onMessage: onMessage) else { return 1 }
+        guard let resolvedDestination = await resolveCopyEndpoint(destination, request: request, onMessage: onMessage) else { return 1 }
+        do {
+            try await adapter.copyFile(source: resolvedSource, destination: resolvedDestination)
+            onMessage(.resultMessage("copied \(source) -> \(destination)"))
+            return 0
+        } catch {
+            onMessage(.errorMessage("\(error)"))
+            return 1
+        }
+    }
+
+    /// Rewrites a `service:path` endpoint to `containerID:path`, which is
+    /// what `RuntimeAdapter.copyFile` documents as already-resolved. A path
+    /// with no `service:` prefix — a plain host path — passes through
+    /// unchanged.
+    private func resolveCopyEndpoint(
+        _ path: String,
+        request: ProtocolRequest,
+        onMessage: @escaping @Sendable (ProtocolMessage) -> Void
+    ) async -> String? {
+        guard let colon = path.firstIndex(of: ":"), colon > path.startIndex else { return path }
+        let serviceName = String(path[path.startIndex..<colon])
+        let innerPath = String(path[path.index(after: colon)...])
+        guard let projectName = resolveProjectName(request, onMessage: onMessage) else { return nil }
+        guard let observed = try? await adapter.observe(projectName: projectName),
+              let container = observed.first(where: { $0.service == serviceName }) else {
+            onMessage(.errorMessage("no container for service '\(serviceName)' in project '\(projectName)'"))
+            return nil
+        }
+        return "\(container.containerID):\(innerPath)"
+    }
+
+    private func runExport(
+        _ request: ProtocolRequest,
+        service: String,
+        outputPath: String,
+        onMessage: @escaping @Sendable (ProtocolMessage) -> Void
+    ) async -> Int32 {
+        guard let projectName = resolveProjectName(request, onMessage: onMessage) else { return 1 }
+        guard let observed = try? await adapter.observe(projectName: projectName),
+              let container = observed.first(where: { $0.service == service }) else {
+            onMessage(.errorMessage("no container for service '\(service)' in project '\(projectName)'"))
+            return 1
+        }
+        do {
+            try await adapter.exportContainer(containerID: container.containerID, to: outputPath)
+            onMessage(.resultMessage("exported \(service) to \(outputPath)"))
+            return 0
+        } catch {
+            onMessage(.errorMessage("\(error)"))
+            return 1
+        }
+    }
+
+    // MARK: - Watch
+
+    /// A polling inner-loop: no filesystem-event API is used, so this trades
+    /// instant reaction for something that works identically on every
+    /// platform this tool targets. The 1-second tick matches `wait`'s own
+    /// polling granularity in `EngineLifecycle`. Runs until the enclosing
+    /// task is cancelled — the same "blocks until interrupted" shape as
+    /// `logs --follow`.
+    ///
+    /// This bypasses `Engine` deliberately: `up`'s reconciliation compares
+    /// `configHash` (the service's *declared* config), which a `rebuild`
+    /// here does not change — the point of a watch-triggered rebuild is a
+    /// changed *image*, which `Reconciler` has no way to notice. Recreating
+    /// the container directly, here, is what actually picks that up.
+    private func runWatch(_ request: ProtocolRequest, services: [String], onMessage: @escaping @Sendable (ProtocolMessage) -> Void) async -> Int32 {
+        guard let plan = resolvePlan(request, requestedServices: services, onMessage: onMessage) else { return 1 }
+        guard let composeFilePath = request.composeFilePath else {
+            onMessage(.errorMessage("watch requires --file"))
+            return 1
+        }
+        let directory = URL(fileURLWithPath: composeFilePath).deletingLastPathComponent().path
+
+        let watchable = plan.services.filter { !($0.develop?.watch ?? []).isEmpty }
+        guard !watchable.isEmpty else {
+            onMessage(.errorMessage("no requested service declares develop.watch"))
+            return 1
+        }
+
+        onMessage(ProtocolMessage(type: .planned, services: watchable.map(\.name), waves: [watchable.map(\.name)]))
+
+        guard let observed = try? await adapter.observe(projectName: plan.projectName) else {
+            onMessage(.errorMessage("failed to observe containers for project '\(plan.projectName)'"))
+            return 1
+        }
+        var containerByService: [String: String] = Dictionary(
+            uniqueKeysWithValues: observed.filter { $0.running }.map { ($0.service, $0.containerID) }
+        )
+
+        var snapshots: [String: [String: Date]] = [:]
+        for service in watchable {
+            for rule in service.develop?.watch ?? [] {
+                snapshots[watchKey(service: service.name, rule: rule)] = scanDirectory(rule.path, relativeTo: directory)
+            }
+        }
+
+        while !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+
+            for service in watchable {
+                guard let containerID = containerByService[service.name] else { continue }
+                for rule in service.develop?.watch ?? [] {
+                    let key = watchKey(service: service.name, rule: rule)
+                    let previous = snapshots[key] ?? [:]
+                    let current = scanDirectory(rule.path, relativeTo: directory)
+                    snapshots[key] = current
+
+                    let changes = WatchPlanner.diff(
+                        previous: previous.mapValues { "\($0.timeIntervalSince1970)" },
+                        current: current.mapValues { "\($0.timeIntervalSince1970)" }
+                    )
+                    let relevantPaths = changes
+                        .filter { $0.kind != .removed && !WatchPlanner.isIgnored($0.path, by: rule) }
+                        .map(\.path)
+                    guard !relevantPaths.isEmpty, let action = rule.watchAction else { continue }
+
+                    do {
+                        if let newContainerID = try await applyWatchAction(
+                            action, rule: rule, service: service, projectName: plan.projectName,
+                            containerID: containerID, directory: directory, changedPaths: relevantPaths, onMessage: onMessage
+                        ) {
+                            containerByService[service.name] = newContainerID
+                        }
+                    } catch {
+                        onMessage(.errorMessage("\(service.name): \(error)"))
+                    }
+                }
+            }
+        }
+        return 0
+    }
+
+    private func watchKey(service: String, rule: WatchRule) -> String {
+        "\(service)\u{0}\(rule.path)"
+    }
+
+    /// Applies one triggered watch rule. Returns the container's new ID when
+    /// a rebuild recreated it (so the caller's tracking stays current), nil
+    /// otherwise.
+    private func applyWatchAction(
+        _ action: WatchAction,
+        rule: WatchRule,
+        service: PlannedService,
+        projectName: String,
+        containerID: String,
+        directory: String,
+        changedPaths: [String],
+        onMessage: @escaping @Sendable (ProtocolMessage) -> Void
+    ) async throws -> String? {
+        switch action {
+        case .sync, .syncRestart:
+            guard let target = rule.target else {
+                onMessage(.errorMessage("\(service.name): watch rule for '\(rule.path)' needs a target for action '\(rule.action)'"))
+                return nil
+            }
+            onMessage(ProtocolMessage(type: .serviceState, service: service.name, state: ServiceState.syncing.rawValue, detail: rule.path))
+            let sourceRoot = watchRootURL(rule.path, relativeTo: directory).path
+            for hostPath in changedPaths {
+                var relative = String(hostPath.dropFirst(sourceRoot.count))
+                if relative.hasPrefix("/") { relative.removeFirst() }
+                let destination = target.hasSuffix("/") ? target + relative : target + "/" + relative
+                try await adapter.copyFile(source: hostPath, destination: "\(containerID):\(destination)")
+            }
+            if action == .syncRestart {
+                try await adapter.stopContainer(id: containerID)
+                try await adapter.startContainer(id: containerID)
+            }
+            onMessage(ProtocolMessage(type: .serviceReady, service: service.name, container: containerID, reused: false))
+            return nil
+
+        case .rebuild:
+            onMessage(ProtocolMessage(type: .serviceState, service: service.name, state: ServiceState.building.rawValue, detail: service.build?.context))
+            let image = try await adapter.buildImage(for: service, projectName: projectName)
+            onMessage(ProtocolMessage(type: .serviceState, service: service.name, state: ServiceState.recreating.rawValue, detail: "develop.watch rebuild"))
+            try await adapter.stopContainer(id: containerID)
+            try await adapter.deleteContainer(id: containerID, force: true)
+            let newID = try await adapter.createContainer(for: service, image: image, projectName: projectName)
+            try await adapter.startContainer(id: newID)
+            onMessage(ProtocolMessage(type: .serviceReady, service: service.name, container: newID, reused: false))
+            return newID
+        }
+    }
+
+    /// Builds the absolute URL a `develop.watch` rule's `path` resolves to,
+    /// normalized via `WatchPlanner.normalizedRulePath` first — see that
+    /// function's doc comment for why the normalization has to happen before
+    /// `appendingPathComponent`, not after.
+    private func watchRootURL(_ relativePath: String, relativeTo directory: String) -> URL {
+        URL(fileURLWithPath: directory).appendingPathComponent(WatchPlanner.normalizedRulePath(relativePath))
+    }
+
+    /// Recursively snapshots `relativePath` (relative to `directory`) as
+    /// path -> modification time. Direct `FileManager` use, not routed
+    /// through `ComposeFileProvider`: that protocol's contract is "read one
+    /// compose-related file's contents," not "walk an arbitrary directory
+    /// tree," and stretching it to cover watch's very different shape would
+    /// make it serve two unrelated purposes.
+    private func scanDirectory(_ relativePath: String, relativeTo directory: String) -> [String: Date] {
+        let root = watchRootURL(relativePath, relativeTo: directory)
+        let fm = FileManager.default
+        var isDirectory: ObjCBool = false
+        guard fm.fileExists(atPath: root.path, isDirectory: &isDirectory) else { return [:] }
+
+        if !isDirectory.boolValue {
+            let mtime = (try? fm.attributesOfItem(atPath: root.path))?[.modificationDate] as? Date
+            return mtime.map { [root.path: $0] } ?? [:]
+        }
+
+        guard let enumerator = fm.enumerator(at: root, includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey]) else {
+            return [:]
+        }
+        var result: [String: Date] = [:]
+        for case let fileURL as URL in enumerator {
+            guard let values = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey, .isDirectoryKey]),
+                  values.isDirectory != true, let mtime = values.contentModificationDate else { continue }
+            result[fileURL.path] = mtime
+        }
+        return result
     }
 
     // MARK: - Planning
@@ -102,12 +687,40 @@ public struct ProtocolRunner: Sendable {
         }
     }
 
+    /// Same as `resolvePlan`, without emitting a message on failure — used by
+    /// `runPassthrough`, which has no message stream to emit onto.
+    private func resolvePlanPlain(_ request: ProtocolRequest, requestedServices: [String]) -> Plan? {
+        guard let path = request.composeFilePath,
+              let document = files.contents(atPath: path),
+              let projectName = resolveProjectNamePlain(request) else { return nil }
+
+        let directory = URL(fileURLWithPath: path).deletingLastPathComponent().path
+        let variables = resolveVariables(request, directory: directory)
+
+        return try? Planner(files: files).plan(
+            document: document,
+            options: PlanOptions(
+                projectName: projectName,
+                directory: directory,
+                variables: variables,
+                activeProfiles: request.profiles,
+                requestedServices: requestedServices,
+                capabilities: capabilities
+            )
+        )
+    }
+
     private func resolveProjectName(_ request: ProtocolRequest, onMessage: @escaping @Sendable (ProtocolMessage) -> Void) -> String? {
-        if let explicit = request.projectName { return explicit }
-        guard let path = request.composeFilePath else {
+        guard let name = resolveProjectNamePlain(request) else {
             onMessage(.errorMessage("a project name or a compose file is required"))
             return nil
         }
+        return name
+    }
+
+    private func resolveProjectNamePlain(_ request: ProtocolRequest) -> String? {
+        if let explicit = request.projectName { return explicit }
+        guard let path = request.composeFilePath else { return nil }
         // The same convention Compose itself uses: the containing directory's
         // name, when nothing is declared explicitly.
         return URL(fileURLWithPath: path).deletingLastPathComponent().lastPathComponent

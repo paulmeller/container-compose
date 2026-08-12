@@ -20,6 +20,15 @@ public struct ContainerRuntimeAdapter: RuntimeAdapter {
     /// recreated every time.
     public static let configHashLabel = "dev.container-compose.config-hash"
 
+    /// Marks a container created by `runPassthrough` as NOT part of the
+    /// managed, reconciled set — `listContainers` excludes anything carrying
+    /// it. Without this, a `run` container (stamped with the same project and
+    /// service labels as the real managed one, so a human inspecting it can
+    /// still tell what it belongs to) would be indistinguishable from that
+    /// managed container to `observe()`, and `ps`/`port`/`cp`/`export`/
+    /// `Reconciler` could all pick the wrong one whenever both exist at once.
+    public static let oneOffLabel = "com.docker.compose.oneoff"
+
     public init() {}
 
     // MARK: - Observation
@@ -48,6 +57,7 @@ public struct ContainerRuntimeAdapter: RuntimeAdapter {
             let labels = entry.configuration.labels ?? [:]
             guard let project = labels["com.docker.compose.project"],
                   let service = labels["com.docker.compose.service"] else { return nil }
+            guard labels[Self.oneOffLabel] != "True" else { return nil }
             return ObservedContainer(
                 project: project,
                 service: service,
@@ -295,7 +305,13 @@ public struct ContainerRuntimeAdapter: RuntimeAdapter {
             args.append(contentsOf: ["-e", "\(key)=\(value)"])
         }
         if let workingDirectory { args.append(contentsOf: ["--cwd", workingDirectory]) }
-        for (key, value) in labels.sorted(by: { $0.key < $1.key }) {
+        // Stamped here, unconditionally, rather than left to the caller: every
+        // `runPassthrough` invocation is one-off by definition (see the
+        // protocol doc comment), so this invariant must not depend on every
+        // call site remembering to set it.
+        var allLabels = labels
+        allLabels[Self.oneOffLabel] = "True"
+        for (key, value) in allLabels.sorted(by: { $0.key < $1.key }) {
             args.append(contentsOf: ["-l", "\(key)=\(value)"])
         }
         args.append(image)

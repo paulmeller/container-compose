@@ -41,9 +41,22 @@ let encoder = JSONEncoder()
 // and `logs --follow`.)
 setvbuf(stdout, nil, _IOLBF, 0)
 
-let exitCode = await runner.run(request) { message in
+func emit(_ message: ProtocolMessage) {
     guard let data = try? encoder.encode(message), let line = String(data: data, encoding: .utf8) else { return }
     print(line)
 }
 
-exit(exitCode)
+// exec/run inherit this process's stdio directly and never touch the NDJSON
+// stream — the documented exception `RuntimeAdapter.execPassthrough` and
+// `runPassthrough(_:)` describe. A resolution failure (no such service, no
+// project) still gets reported as a normal `error` message, since that part
+// never reaches the passthrough at all.
+switch request.command {
+case .exec, .run:
+    let (exitCode, error) = await runner.runPassthrough(request)
+    if let error { emit(.errorMessage(error)) }
+    exit(exitCode)
+default:
+    let exitCode = await runner.run(request, onMessage: emit)
+    exit(exitCode)
+}

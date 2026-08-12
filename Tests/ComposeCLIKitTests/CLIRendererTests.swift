@@ -112,6 +112,57 @@ struct CLIRendererTests {
         #expect(line.contains("unexpectedly-long-service-name"))
     }
 
+    @Test("container renders project/service, state, id, image and ports")
+    func containerRendering() throws {
+        let renderer = CLIRenderer()
+        let line = try #require(renderer.render(ProtocolMessage(
+            type: .container, service: "web", state: "running", container: "proj-web",
+            project: "proj", image: "nginx:latest", ports: ["0.0.0.0:8080->80"]
+        )))
+        #expect(line.contains("proj/web"))
+        #expect(line.contains("running"))
+        #expect(line.contains("proj-web"))
+        #expect(line.contains("nginx:latest"))
+        #expect(line.contains("0.0.0.0:8080->80"))
+    }
+
+    @Test("config renders the raw output text verbatim")
+    func configRendering() throws {
+        let renderer = CLIRenderer()
+        let line = try #require(renderer.render(.configMessage("{\"projectName\":\"proj\"}")))
+        #expect(line.contains("projectName"))
+    }
+
+    @Test("log lines are prefixed per service")
+    func logRendering() throws {
+        let renderer = CLIRenderer()
+        let line = try #require(renderer.render(.logMessage(service: "web", line: "listening on :80")))
+        #expect(line.contains("web"))
+        #expect(line.contains("listening on :80"))
+    }
+
+    @Test("output renders a service-prefixed text blob when a service is present")
+    func outputRenderingWithService() throws {
+        let renderer = CLIRenderer()
+        let line = try #require(renderer.render(.outputMessage(service: "web", text: "PID   COMMAND\n1     nginx")))
+        #expect(line.contains("web:"))
+        #expect(line.contains("PID   COMMAND"))
+    }
+
+    @Test("output with no service (stats across many containers) omits a prefix")
+    func outputRenderingWithoutService() throws {
+        let renderer = CLIRenderer()
+        let line = try #require(renderer.render(.outputMessage(text: "CONTAINER   CPU\nweb   0.0%")))
+        #expect(line == "CONTAINER   CPU\nweb   0.0%")
+    }
+
+    @Test("result renders its text verbatim")
+    func resultRendering() throws {
+        let renderer = CLIRenderer()
+        let line = try #require(renderer.render(.resultMessage("copied a -> b")))
+        #expect(line.contains("copied a -> b"))
+    }
+
     @Test("capabilities lists supported, unsupported and partial keys")
     func capabilitiesRendering() throws {
         let capabilities = RuntimeCapabilities(

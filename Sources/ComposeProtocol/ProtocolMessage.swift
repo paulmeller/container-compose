@@ -52,6 +52,27 @@ public struct ProtocolMessage: Codable, Sendable, Equatable {
     // service — that never reached the engine at all).
     public let message: String?
 
+    // Present on `container` (ps/ls/images/port): one observed container's
+    // info per message, rather than a single batched array, so a consumer
+    // can render rows as they arrive exactly like every other command here.
+    public let project: String?
+    public let image: String?
+    // Pre-formatted "hostAddress:hostPort->containerPort/proto" strings
+    // rather than a nested struct: every consumer wants to display these,
+    // none has shown a need to recompute them, and a flat string list keeps
+    // the wire format simple for the cross-language case this protocol
+    // exists for.
+    public let ports: [String]?
+
+    // Present on `log` (logs): one line per message, as it arrives.
+    public let line: String?
+
+    // Present on `output` (config/top/stats) and `result` (cp/export): a
+    // single opaque text blob — rendered as-is, since the source has no
+    // structured form (top/stats are runtime-formatted passthrough text) or
+    // the whole point is the operation's own result message (cp/export).
+    public let output: String?
+
     public init(
         type: MessageType,
         capabilities: RuntimeCapabilities? = nil,
@@ -67,7 +88,12 @@ public struct ProtocolMessage: Codable, Sendable, Equatable {
         ready: [String]? = nil,
         failed: [String]? = nil,
         skipped: [String]? = nil,
-        message: String? = nil
+        message: String? = nil,
+        project: String? = nil,
+        image: String? = nil,
+        ports: [String]? = nil,
+        line: String? = nil,
+        output: String? = nil
     ) {
         self.version = Self.currentVersion
         self.type = type
@@ -85,6 +111,11 @@ public struct ProtocolMessage: Codable, Sendable, Equatable {
         self.failed = failed
         self.skipped = skipped
         self.message = message
+        self.project = project
+        self.image = image
+        self.ports = ports
+        self.line = line
+        self.output = output
     }
 
     public enum MessageType: String, Codable, Sendable {
@@ -96,6 +127,16 @@ public struct ProtocolMessage: Codable, Sendable, Equatable {
         case serviceSkipped = "service_skipped"
         case done
         case error
+        /// One observed container — ps/ls/images/port.
+        case container
+        /// The fully-resolved plan, rendered as text — config.
+        case config
+        /// One log line — logs.
+        case log
+        /// An opaque runtime-formatted text blob — top/stats.
+        case output
+        /// A one-shot operation's outcome — cp/export.
+        case result
     }
 }
 
@@ -137,5 +178,43 @@ extension ProtocolMessage {
     /// means the engine was never reached at all.
     public static func errorMessage(_ text: String) -> ProtocolMessage {
         ProtocolMessage(type: .error, message: text)
+    }
+
+    /// One row of `ps`/`ls`/`images`/`port` output — an observed container,
+    /// translated to the wire format's flat shape. `project` is always
+    /// present here (unlike on other message types) since `ls` spans
+    /// multiple projects and needs it to disambiguate same-named services.
+    public static func containerMessage(_ container: ObservedContainer) -> ProtocolMessage {
+        ProtocolMessage(
+            type: .container,
+            service: container.service,
+            state: container.running ? "running" : "stopped",
+            container: container.containerID,
+            project: container.project,
+            image: container.image,
+            ports: container.publishedPorts.isEmpty ? nil : container.publishedPorts.map { $0.wireFormat }
+        )
+    }
+
+    public static func configMessage(_ rendered: String) -> ProtocolMessage {
+        ProtocolMessage(type: .config, output: rendered)
+    }
+
+    public static func logMessage(service: String, line: String) -> ProtocolMessage {
+        ProtocolMessage(type: .log, service: service, line: line)
+    }
+
+    public static func outputMessage(service: String? = nil, text: String) -> ProtocolMessage {
+        ProtocolMessage(type: .output, service: service, output: text)
+    }
+
+    public static func resultMessage(_ text: String) -> ProtocolMessage {
+        ProtocolMessage(type: .result, output: text)
+    }
+}
+
+extension PublishedPort {
+    var wireFormat: String {
+        "\(hostAddress):\(hostPort)->\(containerPort)"
     }
 }

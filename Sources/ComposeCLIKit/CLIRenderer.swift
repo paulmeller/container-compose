@@ -78,6 +78,30 @@ public final class CLIRenderer: @unchecked Sendable {
 
         case .error:
             return "error: \(message.message ?? "unknown error")"
+
+        case .container:
+            let project = message.project ?? ""
+            let service = message.service ?? ""
+            let state = message.state ?? ""
+            let container = message.container ?? ""
+            let image = message.image ?? ""
+            let ports = (message.ports ?? []).joined(separator: ", ")
+            return [project.isEmpty ? service : "\(project)/\(service)", state, container, image, ports]
+                .filter { !$0.isEmpty }
+                .joined(separator: "  ")
+
+        case .config:
+            return message.output ?? ""
+
+        case .log:
+            return column(message.service) + (message.line ?? "")
+
+        case .output:
+            guard let service = message.service else { return message.output ?? "" }
+            return "\(service):\n\(message.output ?? "")"
+
+        case .result:
+            return message.output ?? ""
         }
     }
 

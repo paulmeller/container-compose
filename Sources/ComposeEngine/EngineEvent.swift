@@ -11,6 +11,7 @@ import Foundation
 public enum ServiceState: String, Codable, Sendable {
     case pulling
     case building
+    case pushing
     case creating
     case starting
     case waitingForDependency
@@ -18,6 +19,8 @@ public enum ServiceState: String, Codable, Sendable {
     case recreating
     case stopping
     case removing
+    /// `watch` syncing a changed host path into an already-running container.
+    case syncing
 }
 
 /// Why a service was not attempted at all.

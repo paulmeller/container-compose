@@ -34,9 +34,17 @@ let renderer = CLIRenderer()
 // live progress into output that only appears once the process exits.
 setvbuf(stdout, nil, _IOLBF, 0)
 
-let exitCode = await runner.run(request) { message in
-    guard let line = renderer.render(message) else { return }
-    print(line)
+// exec/run inherit this process's stdio directly — nothing for CLIRenderer to
+// format, since no ProtocolMessage is ever produced for them.
+switch request.command {
+case .exec, .run:
+    let (exitCode, error) = await runner.runPassthrough(request)
+    if let error { FileHandle.standardError.write(Data("error: \(error)\n".utf8)) }
+    exit(exitCode)
+default:
+    let exitCode = await runner.run(request) { message in
+        guard let line = renderer.render(message) else { return }
+        print(line)
+    }
+    exit(exitCode)
 }
-
-exit(exitCode)

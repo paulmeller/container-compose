@@ -177,6 +177,88 @@ public actor Engine {
         return events
     }
 
+    /// Pulls every service's `image:`, concurrently, without creating or
+    /// starting anything. Services with only `build:` are skipped — matching
+    /// `docker compose pull`, since there is nothing registry-side to pull.
+    @discardableResult
+    public func pull(_ plan: Plan, onEvent: (@Sendable (EngineEvent) -> Void)? = nil) async -> [EngineEvent] {
+        await runImageOperation(plan, state: .pulling, onEvent: onEvent) { service in
+            guard let image = service.image else { return nil }
+            try await self.adapter.ensureImage(image)
+            return image
+        }
+    }
+
+    /// Pushes every service's `image:` to its registry, concurrently. Only
+    /// services with an explicit `image:` are eligible — an image built
+    /// without one has no stable, caller-chosen reference to push under.
+    @discardableResult
+    public func push(_ plan: Plan, onEvent: (@Sendable (EngineEvent) -> Void)? = nil) async -> [EngineEvent] {
+        await runImageOperation(plan, state: .pushing, onEvent: onEvent) { service in
+            guard let image = service.image else { return nil }
+            try await self.adapter.pushImage(image)
+            return image
+        }
+    }
+
+    /// Shared shape for `pull`/`push`: run `step` for every service `step`
+    /// applies to (it returns nil to mean "not applicable, skip silently"),
+    /// concurrently, with the same planned/state/ready-or-failed/done event
+    /// pattern `build` uses. No dependency ordering, for the same reason
+    /// `build` has none: neither operation touches a container.
+    private func runImageOperation(
+        _ plan: Plan,
+        state: ServiceState,
+        onEvent: (@Sendable (EngineEvent) -> Void)?,
+        step: @escaping @Sendable (PlannedService) async throws -> String?
+    ) async -> [EngineEvent] {
+        var events: [EngineEvent] = []
+        func emit(_ event: EngineEvent) {
+            events.append(event)
+            onEvent?(event)
+        }
+
+        let eligible = plan.services.filter { $0.image != nil }
+        emit(.planned(services: eligible.map(\.name), waves: [eligible.map(\.name)]))
+
+        var ready: [String] = []
+        var failed: [String] = []
+
+        let results = await withTaskGroup(of: (String, [EngineEvent], Bool).self) { group in
+            for service in eligible {
+                group.addTask {
+                    var localEvents: [EngineEvent] = []
+                    func localEmit(_ event: EngineEvent) {
+                        localEvents.append(event)
+                        onEvent?(event)
+                    }
+                    localEmit(.serviceState(service: service.name, state: state, detail: service.image))
+                    do {
+                        guard let result = try await step(service) else {
+                            return (service.name, localEvents, true)
+                        }
+                        localEmit(.serviceReady(service: service.name, containerID: result, reused: false))
+                        return (service.name, localEvents, true)
+                    } catch {
+                        localEmit(.serviceFailed(service: service.name, reason: "\(error)"))
+                        return (service.name, localEvents, false)
+                    }
+                }
+            }
+            var collected: [(String, [EngineEvent], Bool)] = []
+            for await result in group { collected.append(result) }
+            return collected
+        }
+
+        for (name, serviceEvents, succeeded) in results.sorted(by: { $0.0 < $1.0 }) {
+            events.append(contentsOf: serviceEvents)
+            if succeeded { ready.append(name) } else { failed.append(name) }
+        }
+
+        emit(.done(success: failed.isEmpty, ready: ready, failed: failed, skipped: []))
+        return events
+    }
+
     // MARK: - Execution
 
     private func executeCollectingEvents(

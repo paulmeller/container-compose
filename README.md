@@ -41,11 +41,12 @@ Sources/
                                protocol binary uses — proof by construction
                                that it has no capability the protocol lacks.
 Tests/
-  ComposeCoreTests/            52 tests, ~7ms. No daemon.
-  ComposeEngineTests/          13 tests against the in-memory fake, ~3ms.
-  ComposeProtocolTests/        20 tests, request parsing + wire mapping + full
+  ComposeCoreTests/            64 tests, ~15ms. No daemon.
+  ComposeEngineTests/          26 tests against the in-memory fake, ~1s
+                               (dominated by one deliberate `wait` timeout).
+  ComposeProtocolTests/        54 tests, request parsing + wire mapping + full
                                runs against the fake — no process spawn.
-  ComposeCLIKitTests/          13 tests of pure rendering logic.
+  ComposeCLIKitTests/          17 tests of pure rendering logic.
   ComposeContainerRuntimeLiveTests/
                                4 tests against a REAL `container` daemon —
                                the one place a wrong runtime assumption
@@ -93,27 +94,53 @@ swift build
 .build/debug/container-compose-cli capabilities
 .build/debug/container-compose-cli up --file compose.yml --project myapp
 .build/debug/container-compose-cli up --file compose.yml --project myapp   # run again: reports "reused", touches nothing
+.build/debug/container-compose-cli ps --file compose.yml --project myapp
+.build/debug/container-compose-cli logs --file compose.yml --project myapp --follow web
+.build/debug/container-compose-cli exec --file compose.yml --project myapp web sh
 .build/debug/container-compose-cli down --file compose.yml --project myapp --remove
 ```
 
 `container-compose-protocol` takes the identical arguments and emits one
 JSON object per line on stdout instead of formatted text — that is the
-entire difference between the two binaries.
+entire difference between the two binaries, with one deliberate exception:
+`exec`/`run` inherit the calling process's stdio directly on both binaries,
+since a live terminal session cannot be expressed as line-delimited JSON
+without breaking it — documented at `RuntimeAdapter.execPassthrough`.
+
+## Command surface
+
+Full parity with the fork's 25 subcommands, routed one of two ways
+(`ComposeProtocol/ProtocolRunner.swift` has the exact split):
+
+- **Engine-owned** (need `Reconciler` and/or concurrent multi-service
+  orchestration with the typed event stream): `up`, `down`, `build`, `pull`,
+  `push`, `start`, `stop`, `restart`, `kill`, `rm`, `wait`.
+- **Direct to the adapter** (act on an already-existing single container, or
+  are pure observation — routing them through Engine's reconcile-and-wave
+  machinery would buy nothing): `ps`, `ls`, `images`, `port`, `config`,
+  `logs`, `top`, `stats`, `cp`, `export`, `watch`.
+- **Passthrough exception**: `exec`, `run` — inherited-stdio process
+  execution, never NDJSON, for the reason above.
+
+`watch` polls `develop.watch` paths (1s tick) and syncs, syncs-and-restarts,
+or rebuilds-and-recreates per rule, via `WatchPlanner` (`ComposeCore`, pure
+snapshot diffing) plus `ProtocolRunner`'s I/O loop.
 
 ## Status
 
 Core, Engine, the real adapter, the protocol layer and a CLI all exist and
-are tested end to end, including from a genuinely non-Swift consumer. Known
-gaps, stated rather than hidden:
+are tested end to end, including from a genuinely non-Swift consumer, with
+the full command surface above wired through every layer. Known gaps, stated
+rather than hidden:
 
-- `build:` services are not yet wired into `ContainerRuntimeAdapter.createContainer`
-  — it throws a clear error rather than silently doing nothing.
-- `ProtocolMessage.serviceReady` is reused by `down` to report a torn-down
-  container, and the CLI renders it as "ready" either way — a real if minor
-  wording gap, since the message carries no notion of which command produced it.
-- No `ps`/`logs`/`exec` yet: neither Engine nor the protocol expose them, so
-  the CLI correctly cannot either — the whole point of the layering is that
-  the CLI's surface can never silently exceed what the protocol supports.
+- `ProtocolMessage.serviceReady` is reused by `down` (and by `pull`/`push`,
+  which reuse the `containerID` field for an image reference) to report
+  outcomes that are not literally "a container is ready" — the CLI renders
+  all of them as "ready", a real if minor wording gap, since the message
+  carries no notion of which command produced it.
+- `watch`'s directory scan is a full re-walk every tick, not an incremental
+  filesystem-event API — correct, but not as cheap as a real `FSEvents`/
+  `inotify` integration would be for very large watched trees.
 - No Port Authority integration yet — the last item in the design doc's
   sequencing, and the real test of whether any of this was shaped correctly.
 

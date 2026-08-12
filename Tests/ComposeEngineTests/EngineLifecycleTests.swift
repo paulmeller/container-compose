@@ -169,6 +169,72 @@ struct EngineLifecycleTests {
         #expect(!done.ready.contains("pulled"), "a service with only image: has nothing to build")
     }
 
+    @Test("Engine.pull pulls only services with an image:, skipping build-only ones")
+    func pullOnlyImageServices() async throws {
+        let plan = try Planner(files: InMemoryProvider([:])).plan(
+            document: """
+                services:
+                  pulled:
+                    image: alpine
+                  built:
+                    build:
+                      context: .
+                """,
+            options: PlanOptions(projectName: "proj")
+        )
+
+        let adapter = FakeRuntimeAdapter()
+        let events = await Engine(adapter: adapter).pull(plan)
+        let done = try #require(doneEvent(events))
+
+        #expect(done.ready == ["pulled"])
+        #expect(!done.ready.contains("built"), "a build-only service has nothing to pull")
+    }
+
+    @Test("Engine.push pushes only services with an explicit image:")
+    func pushOnlyImageServices() async throws {
+        let plan = try Planner(files: InMemoryProvider([:])).plan(
+            document: """
+                services:
+                  tagged:
+                    image: myregistry/tagged:1.0
+                  built:
+                    build:
+                      context: .
+                """,
+            options: PlanOptions(projectName: "proj")
+        )
+
+        let adapter = FakeRuntimeAdapter()
+        let events = await Engine(adapter: adapter).push(plan)
+        let done = try #require(doneEvent(events))
+
+        #expect(done.ready == ["tagged"])
+        let pushed = await adapter.pushedImages
+        #expect(pushed == ["myregistry/tagged:1.0"])
+    }
+
+    @Test("Engine.pull reports a pull failure")
+    func pullFailureReported() async throws {
+        let plan = try Planner(files: InMemoryProvider([:])).plan(
+            document: """
+                services:
+                  broken:
+                    image: nope
+                """,
+            options: PlanOptions(projectName: "proj")
+        )
+
+        let adapter = FakeRuntimeAdapter()
+        await adapter.failImage("nope")
+
+        let events = await Engine(adapter: adapter).pull(plan)
+        let done = try #require(doneEvent(events))
+
+        #expect(!done.success)
+        #expect(done.failed == ["broken"])
+    }
+
     @Test("Engine.build reports a build failure without touching containers")
     func buildFailureReported() async throws {
         let plan = try Planner(files: InMemoryProvider([:])).plan(
