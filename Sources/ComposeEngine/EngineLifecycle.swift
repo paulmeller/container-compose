@@ -20,20 +20,20 @@ extension Engine {
     /// `services` empty means every service currently observed.
     @discardableResult
     public func start(projectName: String, services: [String] = [], onEvent: (@Sendable (EngineEvent) -> Void)? = nil) async -> [EngineEvent] {
-        await runLifecycle(projectName: projectName, services: services, onEvent: onEvent) { container in
+        await runLifecycle(projectName: projectName, services: services, onEvent: onEvent, action: { container in
             if container.running { return nil }
             return { try await self.adapterStart(container) }
-        }
+        }, successEvent: { .serviceReady(service: $0.service, containerID: $0.containerID, reused: false) })
     }
 
     /// Stops every targeted, running container. Unlike `down`, nothing is
     /// removed — the container survives, matching `docker compose stop`.
     @discardableResult
     public func stop(projectName: String, services: [String] = [], onEvent: (@Sendable (EngineEvent) -> Void)? = nil) async -> [EngineEvent] {
-        await runLifecycle(projectName: projectName, services: services, onEvent: onEvent) { container in
+        await runLifecycle(projectName: projectName, services: services, onEvent: onEvent, action: { container in
             if !container.running { return nil }
             return { try await self.adapterStop(container) }
-        }
+        }, successEvent: { .serviceStopped(service: $0.service, containerID: $0.containerID) })
     }
 
     /// Restarts every targeted container, composed as stop-then-start. The
@@ -41,18 +41,18 @@ extension Engine {
     /// policy cannot be honored at all (see `RuntimeCapabilities`).
     @discardableResult
     public func restart(projectName: String, services: [String] = [], onEvent: (@Sendable (EngineEvent) -> Void)? = nil) async -> [EngineEvent] {
-        await runLifecycle(projectName: projectName, services: services, onEvent: onEvent) { container in
+        await runLifecycle(projectName: projectName, services: services, onEvent: onEvent, action: { container in
             { try await self.adapterRestart(container) }
-        }
+        }, successEvent: { .serviceReady(service: $0.service, containerID: $0.containerID, reused: false) })
     }
 
     /// Sends `signal` to every targeted, running container.
     @discardableResult
     public func kill(projectName: String, services: [String] = [], signal: String, onEvent: (@Sendable (EngineEvent) -> Void)? = nil) async -> [EngineEvent] {
-        await runLifecycle(projectName: projectName, services: services, onEvent: onEvent) { container in
+        await runLifecycle(projectName: projectName, services: services, onEvent: onEvent, action: { container in
             if !container.running { return nil }
             return { try await self.adapterKill(container, signal: signal) }
-        }
+        }, successEvent: { .serviceStopped(service: $0.service, containerID: $0.containerID) })
     }
 
     /// Removes every targeted, stopped container. A running one is skipped —
@@ -61,10 +61,10 @@ extension Engine {
     /// cannot take down a live stack by accident.
     @discardableResult
     public func rm(projectName: String, services: [String] = [], force: Bool, onEvent: (@Sendable (EngineEvent) -> Void)? = nil) async -> [EngineEvent] {
-        await runLifecycle(projectName: projectName, services: services, onEvent: onEvent) { container in
+        await runLifecycle(projectName: projectName, services: services, onEvent: onEvent, action: { container in
             if container.running && !force { return nil }
             return { try await self.adapterRemove(container) }
-        }
+        }, successEvent: { .serviceRemoved(service: $0.service, containerID: $0.containerID) })
     }
 
     /// Blocks until every targeted container stops running, or `timeoutSeconds`
@@ -96,11 +96,11 @@ extension Engine {
 
             if let deadline, Date() >= deadline {
                 emit(.planned(services: lastObserved.map(\.service), waves: [lastObserved.map(\.service)]))
-                let stillRunning = lastObserved.filter(\.running).map(\.service)
-                for name in stillRunning { emit(.serviceFailed(service: name, reason: "timed out waiting for exit")) }
-                let stopped = lastObserved.filter { !$0.running }.map(\.service)
-                for name in stopped { emit(.serviceReady(service: name, containerID: "", reused: true)) }
-                emit(.done(success: false, ready: stopped, failed: stillRunning, skipped: []))
+                let stillRunning = lastObserved.filter(\.running)
+                for container in stillRunning { emit(.serviceFailed(service: container.service, reason: "timed out waiting for exit")) }
+                let stopped = lastObserved.filter { !$0.running }
+                for container in stopped { emit(.serviceStopped(service: container.service, containerID: container.containerID)) }
+                emit(.done(success: false, ready: stopped.map(\.service), failed: stillRunning.map(\.service), skipped: []))
                 return events
             }
 
@@ -109,7 +109,7 @@ extension Engine {
 
         emit(.planned(services: lastObserved.map(\.service), waves: [lastObserved.map(\.service)]))
         for container in lastObserved {
-            emit(.serviceReady(service: container.service, containerID: container.containerID, reused: true))
+            emit(.serviceStopped(service: container.service, containerID: container.containerID))
         }
         emit(.done(success: true, ready: lastObserved.map(\.service), failed: [], skipped: []))
         return events
@@ -123,12 +123,15 @@ extension Engine {
     /// containers being stopped or started. `action` returning nil means
     /// "nothing to do for this one" and reports it as skipped rather than
     /// silently omitting it, so the caller's counts always add up to the
-    /// full targeted set.
+    /// full targeted set. `successEvent` lets each caller report what
+    /// actually happened (ready/stopped/removed) instead of every operation
+    /// claiming "ready" regardless of whether that is true.
     private func runLifecycle(
         projectName: String,
         services: [String],
         onEvent: (@Sendable (EngineEvent) -> Void)?,
-        action: @escaping @Sendable (ObservedContainer) -> (@Sendable () async throws -> Void)?
+        action: @escaping @Sendable (ObservedContainer) -> (@Sendable () async throws -> Void)?,
+        successEvent: @escaping @Sendable (ObservedContainer) -> EngineEvent
     ) async -> [EngineEvent] {
         var events: [EngineEvent] = []
         func emit(_ event: EngineEvent) {
@@ -158,7 +161,7 @@ extension Engine {
                     }
                     do {
                         try await step()
-                        localEmit(.serviceReady(service: container.service, containerID: container.containerID, reused: false))
+                        localEmit(successEvent(container))
                         return (container.service, localEvents, .succeeded)
                     } catch {
                         localEmit(.serviceFailed(service: container.service, reason: "\(error)"))

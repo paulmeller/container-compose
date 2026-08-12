@@ -30,6 +30,17 @@ public enum SkipReason: String, Codable, Sendable {
     case dependencyFailed
 }
 
+/// What `imageReady` reports having happened to the image. Distinguishing
+/// these — rather than reusing `serviceReady` for all three, as build/pull/
+/// push originally did — is what lets a consumer reading one message in
+/// isolation say "built" or "pushed" without having tracked which top-level
+/// command produced it.
+public enum ImageAction: String, Codable, Sendable {
+    case built
+    case pulled
+    case pushed
+}
+
 /// One event in the stream an `up`/`down` operation produces.
 ///
 /// This is the machine contract: a GUI renders these directly, a CLI prints a
@@ -49,6 +60,20 @@ public enum EngineEvent: Sendable, Equatable {
     /// delete-and-recreate implementation cannot report, because for it every
     /// ready service was just recreated.
     case serviceReady(service: String, containerID: String, reused: Bool)
+
+    /// A service's container was stopped, but still exists — `down` without
+    /// `--remove`, `stop`, and `kill`. Kept distinct from `serviceReady`:
+    /// "ready" is not an honest description of a container that was just
+    /// told to stop.
+    case serviceStopped(service: String, containerID: String)
+
+    /// A service's container no longer exists — `down --remove`, and `rm`.
+    case serviceRemoved(service: String, containerID: String)
+
+    /// A service's image was produced or relocated — `build`, `pull`, `push`.
+    /// `action` says which, so this reads correctly even outside the context
+    /// of knowing which top-level command emitted it.
+    case imageReady(service: String, image: String, action: ImageAction)
 
     /// A service failed. `service.state` is not set to failed separately —
     /// this event is the terminal state.

@@ -61,6 +61,16 @@ public final class CLIRenderer: @unchecked Sendable {
             let container = message.container.map { " -> \($0)" } ?? ""
             return column(message.service) + mode + container
 
+        case .serviceStopped:
+            return column(message.service) + "stopped" + (message.container.map { " -> \($0)" } ?? "")
+
+        case .serviceRemoved:
+            return column(message.service) + "removed" + (message.container.map { " -> \($0)" } ?? "")
+
+        case .imageReady:
+            let verb = message.action ?? "ready"
+            return column(message.service) + verb + (message.image.map { " -> \($0)" } ?? "")
+
         case .serviceFailed:
             return column(message.service) + "FAILED: \(message.reason ?? "unknown error")"
 

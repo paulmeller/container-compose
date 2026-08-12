@@ -48,9 +48,9 @@ Tests/
                                deliberately lenient basename fallback.
   ComposeEngineTests/          26 tests against the in-memory fake, ~1s
                                (dominated by one deliberate `wait` timeout).
-  ComposeProtocolTests/        56 tests, request parsing + wire mapping + full
+  ComposeProtocolTests/        57 tests, request parsing + wire mapping + full
                                runs against the fake — no process spawn.
-  ComposeCLIKitTests/          17 tests of pure rendering logic.
+  ComposeCLIKitTests/          20 tests of pure rendering logic.
   ComposeContainerRuntimeLiveTests/
                                14 tests against a REAL `container` daemon —
                                the one place a wrong runtime assumption
@@ -142,14 +142,6 @@ are tested end to end, including from a genuinely non-Swift consumer, with
 the full command surface above wired through every layer. Known gaps, stated
 rather than hidden:
 
-- `ProtocolMessage.serviceReady` is reused by `down` (and by `pull`/`push`,
-  which reuse the `containerID` field for an image reference) to report
-  outcomes that are not literally "a container is ready" — the CLI renders
-  all of them as "ready", a real if minor wording gap, since the message
-  carries no notion of which command produced it.
-- `watch`'s directory scan is a full re-walk every tick, not an incremental
-  filesystem-event API — correct, but not as cheap as a real `FSEvents`/
-  `inotify` integration would be for very large watched trees.
 - No Port Authority integration yet — the last item in the design doc's
   sequencing, and the real test of whether any of this was shaped correctly.
 

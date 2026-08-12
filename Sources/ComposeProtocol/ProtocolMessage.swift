@@ -73,6 +73,12 @@ public struct ProtocolMessage: Codable, Sendable, Equatable {
     // the whole point is the operation's own result message (cp/export).
     public let output: String?
 
+    // Present on `image_ready` (build/pull/push): which of the three
+    // happened, so this message reads correctly without the reader having
+    // tracked which top-level command produced it. `image` (above) carries
+    // the resulting reference.
+    public let action: String?
+
     public init(
         type: MessageType,
         capabilities: RuntimeCapabilities? = nil,
@@ -93,7 +99,8 @@ public struct ProtocolMessage: Codable, Sendable, Equatable {
         image: String? = nil,
         ports: [String]? = nil,
         line: String? = nil,
-        output: String? = nil
+        output: String? = nil,
+        action: String? = nil
     ) {
         self.version = Self.currentVersion
         self.type = type
@@ -116,6 +123,7 @@ public struct ProtocolMessage: Codable, Sendable, Equatable {
         self.ports = ports
         self.line = line
         self.output = output
+        self.action = action
     }
 
     public enum MessageType: String, Codable, Sendable {
@@ -123,6 +131,13 @@ public struct ProtocolMessage: Codable, Sendable, Equatable {
         case planned
         case serviceState = "service_state"
         case serviceReady = "service_ready"
+        /// A container was stopped but still exists — `down` (no `--remove`),
+        /// `stop`, `kill`.
+        case serviceStopped = "service_stopped"
+        /// A container no longer exists — `down --remove`, `rm`.
+        case serviceRemoved = "service_removed"
+        /// An image was built, pulled, or pushed — see `action`.
+        case imageReady = "image_ready"
         case serviceFailed = "service_failed"
         case serviceSkipped = "service_skipped"
         case done
@@ -154,6 +169,15 @@ extension ProtocolMessage {
 
         case .serviceReady(let service, let container, let reused):
             self.init(type: .serviceReady, service: service, container: container, reused: reused)
+
+        case .serviceStopped(let service, let container):
+            self.init(type: .serviceStopped, service: service, container: container)
+
+        case .serviceRemoved(let service, let container):
+            self.init(type: .serviceRemoved, service: service, container: container)
+
+        case .imageReady(let service, let image, let action):
+            self.init(type: .imageReady, service: service, image: image, action: action.rawValue)
 
         case .serviceFailed(let service, let reason):
             self.init(type: .serviceFailed, service: service, reason: reason)

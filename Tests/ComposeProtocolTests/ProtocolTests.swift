@@ -221,6 +221,9 @@ struct ProtocolMessageMappingTests {
             (.planned(services: ["a"], waves: [["a"]]), .planned),
             (.serviceState(service: "a", state: .pulling, detail: "img"), .serviceState),
             (.serviceReady(service: "a", containerID: "id", reused: true), .serviceReady),
+            (.serviceStopped(service: "a", containerID: "id"), .serviceStopped),
+            (.serviceRemoved(service: "a", containerID: "id"), .serviceRemoved),
+            (.imageReady(service: "a", image: "a:latest", action: .built), .imageReady),
             (.serviceFailed(service: "a", reason: "boom"), .serviceFailed),
             (.serviceSkipped(service: "a", reason: .dependencyFailed), .serviceSkipped),
             (.done(success: true, ready: ["a"], failed: [], skipped: []), .done),
@@ -236,6 +239,16 @@ struct ProtocolMessageMappingTests {
         let fresh = ProtocolMessage(.serviceReady(service: "web", containerID: "c1", reused: false))
         #expect(reused.reused == true)
         #expect(fresh.reused == false)
+    }
+
+    @Test("imageReady carries which action happened and the resulting image reference")
+    func imageReadyCarriesActionAndImage() throws {
+        let built = ProtocolMessage(.imageReady(service: "web", image: "proj/web:latest", action: .built))
+        #expect(built.action == "built")
+        #expect(built.image == "proj/web:latest")
+
+        let pushed = ProtocolMessage(.imageReady(service: "web", image: "registry/web:1.0", action: .pushed))
+        #expect(pushed.action == "pushed")
     }
 
     @Test("A message round-trips through JSON without loss")
@@ -376,7 +389,7 @@ struct ProtocolRunnerTests {
         let (messages, exitCode) = await collectMessages(request, adapter: adapter)
 
         #expect(exitCode == 0)
-        #expect(messages.contains { $0.type == .serviceReady && $0.service == "web" })
+        #expect(messages.contains { $0.type == .serviceRemoved && $0.service == "web" }, "down --remove must report removed, not ready — the container no longer exists")
 
         let containers = await adapter.containers
         #expect(containers.isEmpty)
@@ -571,13 +584,13 @@ struct ProtocolRunnerExpandedTests {
             ProtocolRequest(command: .pull(services: []), composeFilePath: "compose.yml", projectName: "proj"), files: files
         )
         #expect(pull.exitCode == 0)
-        #expect(pull.messages.contains { $0.type == .serviceReady && $0.service == "web" })
+        #expect(pull.messages.contains { $0.type == .imageReady && $0.service == "web" && $0.action == "pulled" })
 
         let push = await collectMessages(
             ProtocolRequest(command: .push(services: []), composeFilePath: "compose.yml", projectName: "proj"), files: files
         )
         #expect(push.exitCode == 0)
-        #expect(push.messages.contains { $0.type == .serviceReady && $0.service == "web" })
+        #expect(push.messages.contains { $0.type == .imageReady && $0.service == "web" && $0.action == "pushed" })
     }
 
     @Test("start/stop route through Engine's lifecycle operations without needing --file")

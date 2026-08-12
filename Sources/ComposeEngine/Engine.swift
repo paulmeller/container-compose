@@ -182,7 +182,7 @@ public actor Engine {
     /// `docker compose pull`, since there is nothing registry-side to pull.
     @discardableResult
     public func pull(_ plan: Plan, onEvent: (@Sendable (EngineEvent) -> Void)? = nil) async -> [EngineEvent] {
-        await runImageOperation(plan, state: .pulling, onEvent: onEvent) { service in
+        await runImageOperation(plan, state: .pulling, action: .pulled, onEvent: onEvent) { service in
             guard let image = service.image else { return nil }
             try await self.adapter.ensureImage(image)
             return image
@@ -194,7 +194,7 @@ public actor Engine {
     /// without one has no stable, caller-chosen reference to push under.
     @discardableResult
     public func push(_ plan: Plan, onEvent: (@Sendable (EngineEvent) -> Void)? = nil) async -> [EngineEvent] {
-        await runImageOperation(plan, state: .pushing, onEvent: onEvent) { service in
+        await runImageOperation(plan, state: .pushing, action: .pushed, onEvent: onEvent) { service in
             guard let image = service.image else { return nil }
             try await self.adapter.pushImage(image)
             return image
@@ -209,6 +209,7 @@ public actor Engine {
     private func runImageOperation(
         _ plan: Plan,
         state: ServiceState,
+        action: ImageAction,
         onEvent: (@Sendable (EngineEvent) -> Void)?,
         step: @escaping @Sendable (PlannedService) async throws -> String?
     ) async -> [EngineEvent] {
@@ -237,7 +238,7 @@ public actor Engine {
                         guard let result = try await step(service) else {
                             return (service.name, localEvents, true)
                         }
-                        localEmit(.serviceReady(service: service.name, containerID: result, reused: false))
+                        localEmit(.imageReady(service: service.name, image: result, action: action))
                         return (service.name, localEvents, true)
                     } catch {
                         localEmit(.serviceFailed(service: service.name, reason: "\(error)"))
@@ -326,11 +327,7 @@ public actor Engine {
         emit(.serviceState(service: service.name, state: .building, detail: service.build?.context))
         do {
             let image = try await adapter.buildImage(for: service, projectName: projectName)
-            // Reuses `serviceReady`'s `containerID` field for the built image
-            // reference rather than adding a build-only event case: the
-            // meaning ("here is the identifier this step produced") is the
-            // same, and a renderer already knows how to show it.
-            emit(.serviceReady(service: service.name, containerID: image, reused: false))
+            emit(.imageReady(service: service.name, image: image, action: .built))
             return (service.name, events, true)
         } catch {
             emit(.serviceFailed(service: service.name, reason: "\(error)"))
@@ -355,8 +352,10 @@ public actor Engine {
             if remove {
                 emit(.serviceState(service: container.service, state: .removing, detail: nil))
                 try await adapter.deleteContainer(id: container.containerID, force: true)
+                emit(.serviceRemoved(service: container.service, containerID: container.containerID))
+            } else {
+                emit(.serviceStopped(service: container.service, containerID: container.containerID))
             }
-            emit(.serviceReady(service: container.service, containerID: container.containerID, reused: false))
             return (container.service, events, true)
         } catch {
             emit(.serviceFailed(service: container.service, reason: "\(error)"))

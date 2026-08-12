@@ -249,17 +249,33 @@ struct EngineDownTests {
         #expect(success)
         #expect(Set(ready) == ["web", "db"])
 
+        // Regression: a container that survives `down` (no --remove) must be
+        // reported as stopped, not as "ready" — it is not running.
+        let stoppedEvents = events.compactMap { event -> String? in
+            if case .serviceStopped(let service, _) = event { return service }
+            return nil
+        }
+        #expect(Set(stoppedEvents) == ["web", "db"])
+        #expect(!events.contains { if case .serviceReady = $0 { return true }; return false })
+
         let containers = await adapter.containers
         #expect(containers.count == 2, "without remove:true, containers must still exist")
         #expect(containers.values.allSatisfy { !$0.running })
     }
 
-    @Test("down with remove:true deletes containers")
+    @Test("down with remove:true deletes containers and reports serviceRemoved")
     func downWithRemoveDeletesContainers() async throws {
         let adapter = FakeRuntimeAdapter()
         await adapter.seed(id: "web-id", project: "proj", service: "web", running: true, configHash: "h1")
 
-        _ = await Engine(adapter: adapter).down(projectName: "proj", remove: true)
+        let events = await Engine(adapter: adapter).down(projectName: "proj", remove: true)
+
+        let removedEvents = events.compactMap { event -> String? in
+            if case .serviceRemoved(let service, _) = event { return service }
+            return nil
+        }
+        #expect(removedEvents == ["web"])
+        #expect(!events.contains { if case .serviceStopped = $0 { return true }; return false }, "removed, not merely stopped")
 
         let containers = await adapter.containers
         #expect(containers.isEmpty, "down --remove must be the ONLY path that deletes")

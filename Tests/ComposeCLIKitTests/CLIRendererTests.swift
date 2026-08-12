@@ -57,6 +57,39 @@ struct CLIRendererTests {
         #expect(line.contains("myproj-web"))
     }
 
+    @Test("serviceStopped reads as stopped, distinct from ready or removed")
+    func serviceStoppedRendering() throws {
+        let renderer = CLIRenderer()
+        let line = try #require(renderer.render(ProtocolMessage(type: .serviceStopped, service: "web", container: "proj-web")))
+        #expect(line.contains("stopped"))
+        #expect(line.contains("proj-web"))
+        #expect(!line.contains("ready"))
+        #expect(!line.contains("removed"))
+    }
+
+    @Test("serviceRemoved reads as removed, distinct from ready or stopped")
+    func serviceRemovedRendering() throws {
+        let renderer = CLIRenderer()
+        let line = try #require(renderer.render(ProtocolMessage(type: .serviceRemoved, service: "web", container: "proj-web")))
+        #expect(line.contains("removed"))
+        #expect(!line.contains("ready"))
+        #expect(!line.contains("stopped"))
+    }
+
+    @Test("imageReady renders the action (built/pulled/pushed) and the image reference")
+    func imageReadyRendering() throws {
+        let renderer = CLIRenderer()
+        let built = try #require(renderer.render(ProtocolMessage(type: .imageReady, service: "web", image: "proj/web:latest", action: "built")))
+        #expect(built.contains("built"))
+        #expect(built.contains("proj/web:latest"))
+
+        let pulled = try #require(renderer.render(ProtocolMessage(type: .imageReady, service: "web", image: "nginx:alpine", action: "pulled")))
+        #expect(pulled.contains("pulled"))
+
+        let pushed = try #require(renderer.render(ProtocolMessage(type: .imageReady, service: "web", image: "registry/web:1.0", action: "pushed")))
+        #expect(pushed.contains("pushed"))
+    }
+
     @Test("serviceFailed surfaces the reason")
     func serviceFailedShowsReason() throws {
         let renderer = CLIRenderer()

@@ -46,6 +46,8 @@ struct EngineLifecycleTests {
 
         #expect(done.ready == ["running-one"])
         #expect(done.skipped == ["already-stopped"])
+        #expect(events.contains { if case .serviceStopped(let service, _) = $0 { return service == "running-one" }; return false }, "stop must report stopped, not ready — the container is not running")
+        #expect(!events.contains { if case .serviceReady = $0 { return true }; return false })
 
         let containers = await adapter.containers
         #expect(containers["a"]?.running == false)
@@ -106,6 +108,7 @@ struct EngineLifecycleTests {
         let done = try #require(doneEvent(events))
 
         #expect(done.ready == ["running"])
+        #expect(events.contains { if case .serviceRemoved(let service, _) = $0 { return service == "running" }; return false }, "rm must report removed, not ready — the container no longer exists")
         let containers = await adapter.containers
         #expect(containers["a"] == nil)
     }
@@ -121,6 +124,7 @@ struct EngineLifecycleTests {
 
         #expect(done.ready == ["running"])
         #expect(done.skipped == ["stopped"])
+        #expect(events.contains { if case .serviceStopped(let service, _) = $0 { return service == "running" }; return false }, "kill must report stopped, not ready")
     }
 
     @Test("wait returns immediately when every target is already stopped")
@@ -133,6 +137,7 @@ struct EngineLifecycleTests {
 
         #expect(done.success)
         #expect(done.ready == ["web"])
+        #expect(events.contains { if case .serviceStopped(let service, _) = $0 { return service == "web" }; return false }, "wait succeeding means the container reached stopped, not ready")
     }
 
     @Test("wait times out and reports still-running services as failed")
@@ -167,6 +172,7 @@ struct EngineLifecycleTests {
 
         #expect(done.ready == ["built"])
         #expect(!done.ready.contains("pulled"), "a service with only image: has nothing to build")
+        #expect(events.contains { if case .imageReady(let service, _, let action) = $0 { return service == "built" && action == .built }; return false })
     }
 
     @Test("Engine.pull pulls only services with an image:, skipping build-only ones")
@@ -189,6 +195,7 @@ struct EngineLifecycleTests {
 
         #expect(done.ready == ["pulled"])
         #expect(!done.ready.contains("built"), "a build-only service has nothing to pull")
+        #expect(events.contains { if case .imageReady(let service, _, let action) = $0 { return service == "pulled" && action == .pulled }; return false })
     }
 
     @Test("Engine.push pushes only services with an explicit image:")
@@ -212,6 +219,7 @@ struct EngineLifecycleTests {
         #expect(done.ready == ["tagged"])
         let pushed = await adapter.pushedImages
         #expect(pushed == ["myregistry/tagged:1.0"])
+        #expect(events.contains { if case .imageReady(let service, let image, let action) = $0 { return service == "tagged" && image == "myregistry/tagged:1.0" && action == .pushed }; return false })
     }
 
     @Test("Engine.pull reports a pull failure")
