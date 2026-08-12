@@ -12,6 +12,8 @@ let package = Package(
         .library(name: "ComposeContainerRuntime", targets: ["ComposeContainerRuntime"]),
         .library(name: "ComposeProtocol", targets: ["ComposeProtocol"]),
         .executable(name: "container-compose-protocol", targets: ["container-compose-protocol"]),
+        .library(name: "ComposeCLIKit", targets: ["ComposeCLIKit"]),
+        .executable(name: "container-compose-cli", targets: ["container-compose-cli"]),
     ],
     dependencies: [
         .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.0")
@@ -95,6 +97,30 @@ let package = Package(
         .executableTarget(
             name: "container-compose-protocol",
             dependencies: ["ComposeProtocol", "ComposeContainerRuntime"]
+        ),
+
+        // Formats a ProtocolMessage stream as human-readable lines. This is
+        // the entire delta between the CLI and the protocol binary: same
+        // request parsing, same runner, different rendering. Its own library
+        // target so the formatting logic is unit-testable without a process
+        // or a daemon, same as every other layer.
+        .target(
+            name: "ComposeCLIKit",
+            dependencies: ["ComposeCore", "ComposeProtocol"]
+        ),
+        .testTarget(
+            name: "ComposeCLIKitTests",
+            dependencies: ["ComposeCLIKit", "ComposeCore", "ComposeProtocol"]
+        ),
+
+        // The human-facing binary. Calls the identical ProtocolRequest.parse
+        // and ProtocolRunner that container-compose-protocol uses — proof
+        // by construction that this consumer has no access the protocol
+        // layer does not expose, which is the design's central discipline
+        // for this layer.
+        .executableTarget(
+            name: "container-compose-cli",
+            dependencies: ["ComposeProtocol", "ComposeContainerRuntime", "ComposeCLIKit"]
         ),
     ]
 )
