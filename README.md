@@ -41,16 +41,25 @@ Sources/
                                protocol binary uses — proof by construction
                                that it has no capability the protocol lacks.
 Tests/
-  ComposeCoreTests/            64 tests, ~15ms. No daemon.
+  ComposeCoreTests/            76 tests, ~15ms. No daemon — includes a
+                               real-filesystem suite (temp dirs, no
+                               InMemoryProvider) specifically so path
+                               resolution can't hide behind that fake's
+                               deliberately lenient basename fallback.
   ComposeEngineTests/          26 tests against the in-memory fake, ~1s
                                (dominated by one deliberate `wait` timeout).
-  ComposeProtocolTests/        54 tests, request parsing + wire mapping + full
+  ComposeProtocolTests/        56 tests, request parsing + wire mapping + full
                                runs against the fake — no process spawn.
   ComposeCLIKitTests/          17 tests of pure rendering logic.
   ComposeContainerRuntimeLiveTests/
-                               4 tests against a REAL `container` daemon —
+                               14 tests against a REAL `container` daemon —
                                the one place a wrong runtime assumption
-                               could hide from every test above it.
+                               could hide from every test above it. Caught
+                               three live-only bugs this way: a one-off
+                               `run` container colliding with the managed
+                               one, `./`-prefixed watch paths truncating
+                               synced filenames, and uppercase project
+                               names producing an invalid OCI image tag.
 ```
 
 ## The central claim, and how it's tested

@@ -249,3 +249,81 @@ struct EnvironmentTests {
         #expect(parsed.count == 3)
     }
 }
+
+@Suite("Build context resolution")
+struct BuildContextResolutionTests {
+
+    private func plan(_ document: String, directory: String) throws -> Plan {
+        try Planner(files: InMemoryProvider([:])).plan(
+            document: document,
+            options: PlanOptions(projectName: "proj", directory: directory)
+        )
+    }
+
+    // Regression: `container build <context>` is shelled out with no
+    // explicit working directory, so a relative context must be resolved
+    // against the compose file's own directory here — otherwise it silently
+    // resolves against wherever the CLI process happens to be running from,
+    // which is not necessarily where the compose file lives.
+
+    @Test("A shorthand string build: value resolves to an absolute path")
+    func shorthandContextIsAbsolute() throws {
+        let result = try plan("""
+            services:
+              app:
+                build: ./app
+            """, directory: "/projects/myapp")
+        let build = try #require(result.service(named: "app")?.build)
+        #expect(build.context == "/projects/myapp/app")
+    }
+
+    @Test("A mapping form's context: resolves to an absolute path")
+    func mappingContextIsAbsolute() throws {
+        let result = try plan("""
+            services:
+              app:
+                build:
+                  context: .
+            """, directory: "/projects/myapp")
+        let build = try #require(result.service(named: "app")?.build)
+        #expect(build.context == "/projects/myapp")
+    }
+
+    @Test("An already-absolute context is left untouched")
+    func alreadyAbsoluteContextUnchanged() throws {
+        let result = try plan("""
+            services:
+              app:
+                build:
+                  context: /elsewhere/build-root
+            """, directory: "/projects/myapp")
+        let build = try #require(result.service(named: "app")?.build)
+        #expect(build.context == "/elsewhere/build-root")
+    }
+
+    @Test("A relative dockerfile: resolves against the build context, not the compose file's directory")
+    func relativeDockerfileResolvesAgainstContext() throws {
+        let result = try plan("""
+            services:
+              app:
+                build:
+                  context: ./app
+                  dockerfile: docker/Dockerfile.prod
+            """, directory: "/projects/myapp")
+        let build = try #require(result.service(named: "app")?.build)
+        #expect(build.dockerfile == "/projects/myapp/app/docker/Dockerfile.prod")
+    }
+
+    @Test("An already-absolute dockerfile: is left untouched")
+    func alreadyAbsoluteDockerfileUnchanged() throws {
+        let result = try plan("""
+            services:
+              app:
+                build:
+                  context: ./app
+                  dockerfile: /etc/dockerfiles/Dockerfile
+            """, directory: "/projects/myapp")
+        let build = try #require(result.service(named: "app")?.build)
+        #expect(build.dockerfile == "/etc/dockerfiles/Dockerfile")
+    }
+}

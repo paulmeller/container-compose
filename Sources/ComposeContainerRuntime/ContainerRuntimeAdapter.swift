@@ -102,8 +102,14 @@ public struct ContainerRuntimeAdapter: RuntimeAdapter {
         }
         // The service's own `image:` names the tag when both are set
         // (Compose: build produces the image, image: names what to call it);
-        // otherwise a deterministic project-scoped tag.
-        let tag = service.image ?? "\(projectName)/\(service.name):latest"
+        // otherwise a deterministic project-scoped tag. Lowercased: an OCI
+        // image reference's repository portion must be lowercase — an
+        // uppercase project name (a directory named `MyApp`, or an explicit
+        // `--project MyApp`) would otherwise make `container build --tag`
+        // reject the reference outright. Compose itself lowercases derived
+        // project names for the same reason; this reaches the same result
+        // without constraining what `--project`/directory names may contain.
+        let tag = service.image ?? "\(projectName.lowercased())/\(service.name.lowercased()):latest"
 
         var args = ["build", build.context, "--tag", tag]
         if let dockerfile = build.dockerfile { args.append(contentsOf: ["--file", dockerfile]) }
@@ -238,6 +244,15 @@ public struct ContainerRuntimeAdapter: RuntimeAdapter {
     }
 
     public func exportContainer(containerID: String, to outputPath: String) async throws {
+        // `container export` refuses a running container ("container is not
+        // stopped") — undocumented in `container export --help`, found live.
+        // Absorbed here, not surfaced to callers: a user exporting a running
+        // service's filesystem should not need to know this runtime quirk,
+        // and should get the container back exactly as they left it
+        // afterward — success or failure, via `defer`.
+        let wasRunning = try listContainers().first { $0.containerID == containerID }?.running ?? false
+        if wasRunning { try ContainerCLI.run(["stop", containerID]) }
+        defer { if wasRunning { _ = try? ContainerCLI.run(["start", containerID]) } }
         try ContainerCLI.run(["export", "--output", outputPath, containerID])
     }
 

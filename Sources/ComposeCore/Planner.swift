@@ -184,7 +184,7 @@ public struct Planner: Sendable {
         }
 
         let image = try (raw["image"] as? String).map(interpolate)
-        let build = try resolveBuild(raw["build"], interpolate: interpolate)
+        let build = try resolveBuild(raw["build"], directory: options.directory, interpolate: interpolate)
         guard image != nil || build != nil else {
             throw PlanError.serviceMissingImageAndBuild(name)
         }
@@ -229,19 +229,32 @@ public struct Planner: Sendable {
         return service.withConfigHash(Self.hash(service))
     }
 
-    private func resolveBuild(_ value: Any?, interpolate: (String) throws -> String) rethrows -> PlannedBuild? {
+    /// `context`/`dockerfile` are resolved to absolute paths here, against
+    /// the compose file's own directory — not left as written. The real
+    /// adapter shells out to `container build <context>` with no explicit
+    /// working directory, so a relative context would otherwise resolve
+    /// against wherever the CLI happened to be *invoked* from, which is not
+    /// necessarily the compose file's directory (`up --file
+    /// ../other-project/compose.yml` from an unrelated cwd is a normal thing
+    /// to do). `dockerfile`, when relative, resolves against the now-absolute
+    /// context — matching Compose's own documented rule that a relative
+    /// `dockerfile:` is relative to the build context, not the compose file.
+    private func resolveBuild(_ value: Any?, directory: String, interpolate: (String) throws -> String) rethrows -> PlannedBuild? {
         if let context = value as? String {
-            return PlannedBuild(context: try interpolate(context), dockerfile: nil, args: [:], target: nil)
+            let resolvedContext = absolute(try interpolate(context), relativeTo: directory)
+            return PlannedBuild(context: resolvedContext, dockerfile: nil, args: [:], target: nil)
         }
         guard let mapping = value as? [String: Any] else { return nil }
         let context = (mapping["context"] as? String) ?? "."
+        let resolvedContext = absolute(try interpolate(context), relativeTo: directory)
         var args: [String: String] = [:]
         for (key, argument) in Self.mapping(mapping["args"]) {
             args[key] = try interpolate(argument)
         }
+        let dockerfile = try (mapping["dockerfile"] as? String).map(interpolate)
         return PlannedBuild(
-            context: try interpolate(context),
-            dockerfile: try (mapping["dockerfile"] as? String).map(interpolate),
+            context: resolvedContext,
+            dockerfile: dockerfile.map { absolute($0, relativeTo: resolvedContext) },
             args: args,
             target: mapping["target"] as? String
         )
@@ -357,8 +370,21 @@ public struct Planner: Sendable {
         return []
     }
 
+    /// Resolves `path` against `directory` when it is not already absolute.
+    ///
+    /// Deliberately `appendingPathComponent`, not `URL(fileURLWithPath:
+    /// relativeTo:)`: the latter follows RFC 3986 relative-reference
+    /// resolution, which treats a base URL with no trailing slash as a
+    /// *file* and drops its last path component before resolving against it
+    /// — the same rule a browser uses to resolve `b.html` against
+    /// `.../a/base.html` as `.../a/b.html`, not `.../a/base.html/b.html`.
+    /// `options.directory` is a directory, not a file, and is never given
+    /// with a trailing slash (`URL(...).deletingLastPathComponent().path`
+    /// never produces one) — so that rule silently ate the directory's own
+    /// last path component on every call. Caught via `build.context`, but it
+    /// equally affected `env_file`, since both go through this helper.
     private func absolute(_ path: String, relativeTo directory: String) -> String {
-        path.hasPrefix("/") ? path : URL(fileURLWithPath: path, relativeTo: URL(fileURLWithPath: directory)).standardizedFileURL.path
+        path.hasPrefix("/") ? path : URL(fileURLWithPath: directory).appendingPathComponent(path).standardizedFileURL.path
     }
 
     static func mapping(_ value: Any?) -> [String: String] {
