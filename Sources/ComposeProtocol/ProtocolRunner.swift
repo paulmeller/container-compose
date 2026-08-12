@@ -486,12 +486,16 @@ public struct ProtocolRunner: Sendable {
 
     // MARK: - Watch
 
-    /// A polling inner-loop: no filesystem-event API is used, so this trades
-    /// instant reaction for something that works identically on every
-    /// platform this tool targets. The 1-second tick matches `wait`'s own
-    /// polling granularity in `EngineLifecycle`. Runs until the enclosing
-    /// task is cancelled — the same "blocks until interrupted" shape as
-    /// `logs --follow`.
+    /// Event-driven, not a fixed-tick poll: `DirectoryWatcher` (one per
+    /// unique rule root, kqueue-backed) triggers a rescan on real filesystem
+    /// activity, so nothing happens — no re-walk, no re-`stat` of every
+    /// watched file — while the tree is idle. A periodic safety-net rescan
+    /// (5s) still runs alongside it, since directory-level kqueue watching
+    /// cannot see a rare same-inode in-place write with no rename; see
+    /// `DirectoryWatcher`'s doc comment. Runs until the enclosing task is
+    /// cancelled — the same "blocks until interrupted" shape as
+    /// `logs --follow` — via `withTaskCancellationHandler`, since nothing
+    /// else would otherwise wake the loop out of awaiting the next signal.
     ///
     /// This bypasses `Engine` deliberately: `up`'s reconciliation compares
     /// `configHash` (the service's *declared* config), which a `rebuild`
@@ -529,39 +533,66 @@ public struct ProtocolRunner: Sendable {
             }
         }
 
-        while !Task.isCancelled {
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
+        let (wakeups, continuation) = AsyncStream<Void>.makeStream()
 
-            for service in watchable {
-                guard let containerID = containerByService[service.name] else { continue }
-                for rule in service.develop?.watch ?? [] {
-                    let key = watchKey(service: service.name, rule: rule)
-                    let previous = snapshots[key] ?? [:]
-                    let current = scanDirectory(rule.path, relativeTo: directory)
-                    snapshots[key] = current
+        var seenRoots: Set<String> = []
+        var directoryWatchers: [DirectoryWatcher] = []
+        for service in watchable {
+            for rule in service.develop?.watch ?? [] {
+                let root = watchRootURL(rule.path, relativeTo: directory).path
+                guard seenRoots.insert(root).inserted else { continue }
+                directoryWatchers.append(DirectoryWatcher(root: root) { continuation.yield(()) })
+            }
+        }
 
-                    let changes = WatchPlanner.diff(
-                        previous: previous.mapValues { "\($0.timeIntervalSince1970)" },
-                        current: current.mapValues { "\($0.timeIntervalSince1970)" }
-                    )
-                    let relevantPaths = changes
-                        .filter { $0.kind != .removed && !WatchPlanner.isIgnored($0.path, by: rule) }
-                        .map(\.path)
-                    guard !relevantPaths.isEmpty, let action = rule.watchAction else { continue }
+        let safetyNet = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                continuation.yield(())
+            }
+        }
 
-                    do {
-                        if let newContainerID = try await applyWatchAction(
-                            action, rule: rule, service: service, projectName: plan.projectName,
-                            containerID: containerID, directory: directory, changedPaths: relevantPaths, onMessage: onMessage
-                        ) {
-                            containerByService[service.name] = newContainerID
+        await withTaskCancellationHandler {
+            for await _ in wakeups {
+                for service in watchable {
+                    guard let containerID = containerByService[service.name] else { continue }
+                    for rule in service.develop?.watch ?? [] {
+                        let key = watchKey(service: service.name, rule: rule)
+                        let previous = snapshots[key] ?? [:]
+                        let current = scanDirectory(rule.path, relativeTo: directory)
+                        snapshots[key] = current
+
+                        let changes = WatchPlanner.diff(
+                            previous: previous.mapValues { "\($0.timeIntervalSince1970)" },
+                            current: current.mapValues { "\($0.timeIntervalSince1970)" }
+                        )
+                        let relevantPaths = changes
+                            .filter { $0.kind != .removed && !WatchPlanner.isIgnored($0.path, by: rule) }
+                            .map(\.path)
+                        guard !relevantPaths.isEmpty, let action = rule.watchAction else { continue }
+
+                        do {
+                            if let newContainerID = try await applyWatchAction(
+                                action, rule: rule, service: service, projectName: plan.projectName,
+                                containerID: containerID, directory: directory, changedPaths: relevantPaths, onMessage: onMessage
+                            ) {
+                                containerByService[service.name] = newContainerID
+                            }
+                        } catch {
+                            onMessage(.errorMessage("\(service.name): \(error)"))
                         }
-                    } catch {
-                        onMessage(.errorMessage("\(service.name): \(error)"))
                     }
                 }
             }
+        } onCancel: {
+            // The only thing that can unblock `for await _ in wakeups` once
+            // the task is cancelled: nothing else is watching for
+            // cancellation, since the loop only wakes on an explicit yield.
+            continuation.finish()
         }
+
+        safetyNet.cancel()
+        for watcher in directoryWatchers { watcher.stop() }
         return 0
     }
 

@@ -48,8 +48,10 @@ Tests/
                                deliberately lenient basename fallback.
   ComposeEngineTests/          26 tests against the in-memory fake, ~1s
                                (dominated by one deliberate `wait` timeout).
-  ComposeProtocolTests/        57 tests, request parsing + wire mapping + full
-                               runs against the fake — no process spawn.
+  ComposeProtocolTests/        62 tests, request parsing + wire mapping + full
+                               runs against the fake — no process spawn —
+                               plus DirectoryWatcher's own suite, against
+                               real temp directories and real kqueue events.
   ComposeCLIKitTests/          20 tests of pure rendering logic.
   ComposeContainerRuntimeLiveTests/
                                14 tests against a REAL `container` daemon —
@@ -131,9 +133,13 @@ Full parity with the fork's 25 subcommands, routed one of two ways
 - **Passthrough exception**: `exec`, `run` — inherited-stdio process
   execution, never NDJSON, for the reason above.
 
-`watch` polls `develop.watch` paths (1s tick) and syncs, syncs-and-restarts,
-or rebuilds-and-recreates per rule, via `WatchPlanner` (`ComposeCore`, pure
-snapshot diffing) plus `ProtocolRunner`'s I/O loop.
+`watch` is event-driven: `DirectoryWatcher` (`ComposeProtocol`, one
+kqueue-backed `DispatchSourceFileSystemObject` per directory, recursive,
+debounced) triggers a rescan on real filesystem activity, with a 5s
+safety-net rescan alongside it for the one thing directory-level watching
+can't see (a same-inode in-place write with no rename). A rescan diffs via
+`WatchPlanner` (`ComposeCore`, pure snapshot diffing) and syncs,
+syncs-and-restarts, or rebuilds-and-recreates per rule.
 
 ## Status
 
