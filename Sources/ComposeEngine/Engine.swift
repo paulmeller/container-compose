@@ -131,6 +131,48 @@ public actor Engine {
         return events
     }
 
+    /// Builds every service in `plan` that declares `build:`, concurrently.
+    ///
+    /// Unlike `up`'s waves, there is no dependency ordering here: Compose does
+    /// not order builds by `depends_on` (a service depending on another at
+    /// *runtime* says nothing about build order), so every buildable service
+    /// builds in one wave. Services with only `image:` are silently skipped —
+    /// matching `docker compose build`, not reported as failures, since
+    /// "nothing to build" is the expected case for most services in a project.
+    @discardableResult
+    public func build(_ plan: Plan, onEvent: (@Sendable (EngineEvent) -> Void)? = nil) async -> [EngineEvent] {
+        var events: [EngineEvent] = []
+        func emit(_ event: EngineEvent) {
+            events.append(event)
+            onEvent?(event)
+        }
+
+        let buildable = plan.services.filter { $0.build != nil }
+        emit(.planned(services: buildable.map(\.name), waves: [buildable.map(\.name)]))
+
+        var ready: [String] = []
+        var failed: [String] = []
+
+        let results = await withTaskGroup(of: (String, [EngineEvent], Bool).self) { group in
+            for service in buildable {
+                group.addTask {
+                    await self.executeBuild(service, projectName: plan.projectName, onEvent: onEvent)
+                }
+            }
+            var collected: [(String, [EngineEvent], Bool)] = []
+            for await result in group { collected.append(result) }
+            return collected
+        }
+
+        for (name, serviceEvents, succeeded) in results.sorted(by: { $0.0 < $1.0 }) {
+            events.append(contentsOf: serviceEvents)
+            if succeeded { ready.append(name) } else { failed.append(name) }
+        }
+
+        emit(.done(success: failed.isEmpty, ready: ready, failed: failed, skipped: []))
+        return events
+    }
+
     // MARK: - Execution
 
     private func executeCollectingEvents(
@@ -157,12 +199,9 @@ public actor Engine {
                 emit(.serviceReady(service: name, containerID: containerID, reused: false))
 
             case .create(let service):
-                if let image = service.image {
-                    emit(.serviceState(service: name, state: .pulling, detail: image))
-                    try await adapter.ensureImage(image)
-                }
+                let image = try await resolveImage(service, projectName: projectName, emit: emit)
                 emit(.serviceState(service: name, state: .creating, detail: nil))
-                let containerID = try await adapter.createContainer(for: service, projectName: projectName)
+                let containerID = try await adapter.createContainer(for: service, image: image, projectName: projectName)
                 emit(.serviceState(service: name, state: .starting, detail: nil))
                 try await adapter.startContainer(id: containerID)
                 try await waitHealthyIfNeeded(service, containerID: containerID, emit: emit)
@@ -172,12 +211,9 @@ public actor Engine {
                 emit(.serviceState(service: name, state: .recreating, detail: reason))
                 try await adapter.stopContainer(id: containerID)
                 try await adapter.deleteContainer(id: containerID, force: true)
-                if let image = service.image {
-                    emit(.serviceState(service: name, state: .pulling, detail: image))
-                    try await adapter.ensureImage(image)
-                }
+                let image = try await resolveImage(service, projectName: projectName, emit: emit)
                 emit(.serviceState(service: name, state: .creating, detail: nil))
-                let newID = try await adapter.createContainer(for: service, projectName: projectName)
+                let newID = try await adapter.createContainer(for: service, image: image, projectName: projectName)
                 emit(.serviceState(service: name, state: .starting, detail: nil))
                 try await adapter.startContainer(id: newID)
                 try await waitHealthyIfNeeded(service, containerID: newID, emit: emit)
@@ -187,6 +223,32 @@ public actor Engine {
         } catch {
             emit(.serviceFailed(service: name, reason: "\(error)"))
             return (name, events, false)
+        }
+    }
+
+    private func executeBuild(
+        _ service: PlannedService,
+        projectName: String,
+        onEvent: (@Sendable (EngineEvent) -> Void)?
+    ) async -> (String, [EngineEvent], Bool) {
+        var events: [EngineEvent] = []
+        func emit(_ event: EngineEvent) {
+            events.append(event)
+            onEvent?(event)
+        }
+
+        emit(.serviceState(service: service.name, state: .building, detail: service.build?.context))
+        do {
+            let image = try await adapter.buildImage(for: service, projectName: projectName)
+            // Reuses `serviceReady`'s `containerID` field for the built image
+            // reference rather than adding a build-only event case: the
+            // meaning ("here is the identifier this step produced") is the
+            // same, and a renderer already knows how to show it.
+            emit(.serviceReady(service: service.name, containerID: image, reused: false))
+            return (service.name, events, true)
+        } catch {
+            emit(.serviceFailed(service: service.name, reason: "\(error)"))
+            return (service.name, events, false)
         }
     }
 
@@ -224,5 +286,22 @@ public actor Engine {
         guard let healthcheck = service.healthcheck, !healthcheck.disabled else { return }
         emit(.serviceState(service: service.name, state: .waitingForHealthy, detail: nil))
         try await adapter.waitForHealthy(containerID: containerID, healthcheck: healthcheck)
+    }
+
+    /// Resolves the image a service should run: pulled when `image:` is set,
+    /// built when only `build:` is. `Planner` already guarantees at least one
+    /// is present (`PlanError.serviceMissingImageAndBuild`), so this is a
+    /// genuine either/or, not a fallback chain — `image:` takes precedence
+    /// when a service declares both, matching Compose's own documented
+    /// behavior (build is used only to produce the image the first time; an
+    /// explicit `image:` alongside `build:` names what to tag it as).
+    private func resolveImage(_ service: PlannedService, projectName: String, emit: (EngineEvent) -> Void) async throws -> String {
+        if let image = service.image {
+            emit(.serviceState(service: service.name, state: .pulling, detail: image))
+            try await adapter.ensureImage(image)
+            return image
+        }
+        emit(.serviceState(service: service.name, state: .building, detail: service.build?.context))
+        return try await adapter.buildImage(for: service, projectName: projectName)
     }
 }

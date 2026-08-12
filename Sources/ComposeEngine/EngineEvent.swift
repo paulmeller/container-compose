@@ -10,6 +10,7 @@ import Foundation
 /// batched at the end. This is what a consumer renders as progress.
 public enum ServiceState: String, Codable, Sendable {
     case pulling
+    case building
     case creating
     case starting
     case waitingForDependency

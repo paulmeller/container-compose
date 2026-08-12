@@ -44,7 +44,7 @@ struct ReconcilerTests {
               web: { image: nginx }
             """)
         let observed = ObservedContainer(
-            service: "web", containerID: "abc", running: true, configHash: try hash(result, "web")
+            project: "p", service: "web", containerID: "abc", running: true, configHash: try hash(result, "web")
         )
 
         let actions = Reconciler.plan(desired: result, observed: [observed])
@@ -62,7 +62,7 @@ struct ReconcilerTests {
               web: { image: nginx }
             """)
         let observed = ObservedContainer(
-            service: "web", containerID: "abc", running: false, configHash: try hash(result, "web")
+            project: "p", service: "web", containerID: "abc", running: false, configHash: try hash(result, "web")
         )
 
         let actions = Reconciler.plan(desired: result, observed: [observed])
@@ -76,7 +76,7 @@ struct ReconcilerTests {
             services:
               web: { image: nginx }
             """)
-        let observed = ObservedContainer(service: "web", containerID: "abc", running: true, configHash: "stale-hash")
+        let observed = ObservedContainer(project: "p", service: "web", containerID: "abc", running: true, configHash: "stale-hash")
 
         let actions = Reconciler.plan(desired: result, observed: [observed])
 
@@ -96,7 +96,7 @@ struct ReconcilerTests {
               web: { image: nginx }
             """)
         // No configHash at all — e.g. a container this tool did not create.
-        let observed = ObservedContainer(service: "web", containerID: "abc", running: true, configHash: nil)
+        let observed = ObservedContainer(project: "p", service: "web", containerID: "abc", running: true, configHash: nil)
 
         let actions = Reconciler.plan(desired: result, observed: [observed])
 
@@ -148,9 +148,9 @@ struct ReconcilerTests {
             """)
 
         let observed = [
-            ObservedContainer(service: "unchanged", containerID: "1", running: true, configHash: try hash(result, "unchanged")),
-            ObservedContainer(service: "needs-start", containerID: "2", running: false, configHash: try hash(result, "needs-start")),
-            ObservedContainer(service: "needs-recreate", containerID: "3", running: true, configHash: "old"),
+            ObservedContainer(project: "p", service: "unchanged", containerID: "1", running: true, configHash: try hash(result, "unchanged")),
+            ObservedContainer(project: "p", service: "needs-start", containerID: "2", running: false, configHash: try hash(result, "needs-start")),
+            ObservedContainer(project: "p", service: "needs-recreate", containerID: "3", running: true, configHash: "old"),
             // needs-create: nothing observed.
         ]
 
@@ -172,7 +172,7 @@ struct ReconcilerTests {
               web: { image: nginx }
             """)
         let observed = ObservedContainer(
-            service: "web", containerID: "abc", running: true, configHash: try hash(result, "web")
+            project: "p", service: "web", containerID: "abc", running: true, configHash: try hash(result, "web")
         )
 
         let first = Reconciler.plan(desired: result, observed: [observed])

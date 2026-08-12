@@ -9,6 +9,11 @@ import Foundation
 /// observing it. Carries only what reconciliation needs to decide anything —
 /// not a full container inspection.
 public struct ObservedContainer: Sendable, Equatable, Codable {
+    /// Compose project this container belongs to. Every container this tool
+    /// creates always carries both labels together, so this is required, not
+    /// optional — unlike `image`/`publishedPorts`, which depend on how much
+    /// the adapter's list call reports.
+    public let project: String
     public let service: String
     public let containerID: String
     public let running: Bool
@@ -20,11 +25,47 @@ public struct ObservedContainer: Sendable, Equatable, Codable {
     /// brought under management rather than trusted blindly.
     public let configHash: String?
 
-    public init(service: String, containerID: String, running: Bool, configHash: String?) {
+    /// The image reference this container was created from, when the adapter
+    /// can report it. Not used by `Reconciler` (config-hash comparison already
+    /// captures an image change) — carried so `ps`/`images`/`ls` are free from
+    /// the same `observe()` call, rather than needing a second adapter round
+    /// trip just to answer "what image is this running?"
+    public let image: String?
+
+    /// Ports this container publishes to the host, when the adapter can
+    /// report them. Same reasoning as `image`: free for `ps`/`port` from data
+    /// `observe()` already has to fetch.
+    public let publishedPorts: [PublishedPort]
+
+    public init(
+        project: String,
+        service: String,
+        containerID: String,
+        running: Bool,
+        configHash: String?,
+        image: String? = nil,
+        publishedPorts: [PublishedPort] = []
+    ) {
+        self.project = project
         self.service = service
         self.containerID = containerID
         self.running = running
         self.configHash = configHash
+        self.image = image
+        self.publishedPorts = publishedPorts
+    }
+}
+
+/// One published port binding, as reported by the runtime.
+public struct PublishedPort: Sendable, Equatable, Codable {
+    public let containerPort: Int
+    public let hostPort: Int
+    public let hostAddress: String
+
+    public init(containerPort: Int, hostPort: Int, hostAddress: String) {
+        self.containerPort = containerPort
+        self.hostPort = hostPort
+        self.hostAddress = hostAddress
     }
 }
 

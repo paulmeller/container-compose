@@ -56,7 +56,7 @@ struct EngineUpTests {
         let hash = try #require(result.service(named: "web")).configHash
 
         let adapter = FakeRuntimeAdapter()
-        await adapter.seed(id: "existing-id", service: "web", running: true, configHash: hash)
+        await adapter.seed(id: "existing-id", project: "proj", service: "web", running: true, configHash: hash)
 
         let events = await Engine(adapter: adapter).up(result)
 
@@ -82,7 +82,7 @@ struct EngineUpTests {
         let hash = try #require(result.service(named: "web")).configHash
 
         let adapter = FakeRuntimeAdapter()
-        await adapter.seed(id: "existing-id", service: "web", running: false, configHash: hash)
+        await adapter.seed(id: "existing-id", project: "proj", service: "web", running: false, configHash: hash)
 
         _ = await Engine(adapter: adapter).up(result)
 
@@ -99,7 +99,7 @@ struct EngineUpTests {
             """)
 
         let adapter = FakeRuntimeAdapter()
-        await adapter.seed(id: "old-id", service: "web", running: true, configHash: "stale")
+        await adapter.seed(id: "old-id", project: "proj", service: "web", running: true, configHash: "stale")
 
         _ = await Engine(adapter: adapter).up(result)
 
@@ -237,8 +237,8 @@ struct EngineDownTests {
     @Test("down stops every observed container for the project")
     func downStopsEverything() async throws {
         let adapter = FakeRuntimeAdapter()
-        await adapter.seed(id: "web-id", service: "web", running: true, configHash: "h1")
-        await adapter.seed(id: "db-id", service: "db", running: true, configHash: "h2")
+        await adapter.seed(id: "web-id", project: "proj", service: "web", running: true, configHash: "h1")
+        await adapter.seed(id: "db-id", project: "proj", service: "db", running: true, configHash: "h2")
 
         let events = await Engine(adapter: adapter).down(projectName: "proj", remove: false)
 
@@ -257,7 +257,7 @@ struct EngineDownTests {
     @Test("down with remove:true deletes containers")
     func downWithRemoveDeletesContainers() async throws {
         let adapter = FakeRuntimeAdapter()
-        await adapter.seed(id: "web-id", service: "web", running: true, configHash: "h1")
+        await adapter.seed(id: "web-id", project: "proj", service: "web", running: true, configHash: "h1")
 
         _ = await Engine(adapter: adapter).down(projectName: "proj", remove: true)
 

@@ -17,6 +17,18 @@ struct WireContainerEntry: Decodable {
 struct WireConfiguration: Decodable {
     let id: String
     let labels: [String: String]?
+    let image: WireImageDescriptor?
+    let publishedPorts: [WirePublishedPort]?
+}
+
+struct WireImageDescriptor: Decodable {
+    let reference: String
+}
+
+struct WirePublishedPort: Decodable {
+    let containerPort: Int
+    let hostPort: Int
+    let hostAddress: String
 }
 
 struct WireStatus: Decodable {

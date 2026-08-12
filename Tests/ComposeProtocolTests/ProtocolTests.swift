@@ -243,7 +243,7 @@ struct ProtocolRunnerTests {
     @Test("down with no compose file but an explicit project name still works")
     func downWithExplicitProjectOnly() async throws {
         let adapter = FakeRuntimeAdapter()
-        await adapter.seed(id: "proj-web", service: "web", running: true, configHash: "h")
+        await adapter.seed(id: "proj-web", project: "proj", service: "web", running: true, configHash: "h")
 
         let request = ProtocolRequest(command: .down(remove: true), projectName: "proj")
         let (messages, exitCode) = await collectMessages(request, adapter: adapter)

@@ -30,6 +30,12 @@ public struct PlannedService: Codable, Hashable, Sendable {
     public let healthcheck: PlannedHealthcheck?
     public let profiles: [String]
 
+    /// Inner-loop configuration (`develop.watch`), acted on by the `watch`
+    /// command. `nil` for a service with no `develop:` section, which is the
+    /// common case — kept optional rather than an empty array so "no watch
+    /// configured" and "watch configured with zero rules" stay distinguishable.
+    public let develop: Develop?
+
     /// Options that map directly onto runtime flags. Kept as a bag rather than
     /// individual properties so adding a newly-supported key does not ripple
     /// through every layer above.

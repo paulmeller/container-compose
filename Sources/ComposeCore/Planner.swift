@@ -218,6 +218,7 @@ public struct Planner: Sendable {
             dependsOn: Self.dependsOn(raw),
             healthcheck: Self.healthcheck(raw["healthcheck"]),
             profiles: stringList(raw["profiles"]),
+            develop: Self.develop(raw["develop"]),
             runtimeOptions: try runtimeOptions(raw, capabilities: options.capabilities, interpolate: interpolate),
             unsupported: options.capabilities.unsupportedKeys(declaredIn: raw),
             configHash: ""
@@ -394,6 +395,20 @@ public struct Planner: Sendable {
         return []
     }
 
+    static func develop(_ value: Any?) -> Develop? {
+        guard let map = value as? [String: Any], let watchList = map["watch"] as? [Any] else { return nil }
+        let rules: [WatchRule] = watchList.compactMap { entry in
+            guard let rule = entry as? [String: Any], let path = rule["path"] as? String, let action = rule["action"] as? String else { return nil }
+            return WatchRule(
+                path: path,
+                action: action,
+                target: rule["target"] as? String,
+                ignore: (rule["ignore"] as? [Any])?.map { "\($0)" }
+            )
+        }
+        return Develop(watch: rules)
+    }
+
     static func healthcheck(_ value: Any?) -> PlannedHealthcheck? {
         guard let map = value as? [String: Any] else { return nil }
         if map["disable"] as? Bool == true {
@@ -500,7 +515,7 @@ extension PlannedService {
             name: name, image: image, build: build, command: command, entrypoint: entrypoint,
             environment: environment, ports: ports, volumes: volumes, networks: networks,
             labels: labels, dependsOn: dependsOn, healthcheck: healthcheck, profiles: profiles,
-            runtimeOptions: runtimeOptions, unsupported: unsupported, configHash: hash
+            develop: develop, runtimeOptions: runtimeOptions, unsupported: unsupported, configHash: hash
         )
     }
 }

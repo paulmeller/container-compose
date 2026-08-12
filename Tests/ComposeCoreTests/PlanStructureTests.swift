@@ -502,3 +502,103 @@ struct ConfigHashTests {
         #expect(inline == expanded)
     }
 }
+
+@Suite("develop.watch decoding")
+struct DevelopWatchTests {
+
+    private func plan(_ document: String) throws -> Plan {
+        try Planner(files: InMemoryProvider([:])).plan(
+            document: document,
+            options: PlanOptions(projectName: "p")
+        )
+    }
+
+    @Test("A service with no develop section has none")
+    func noDevelopSection() throws {
+        let result = try plan("""
+            services:
+              app: { image: alpine }
+            """)
+        let app = try #require(result.service(named: "app"))
+        #expect(app.develop == nil)
+    }
+
+    @Test("watch rules decode with their action and target")
+    func watchRulesDecode() throws {
+        let result = try plan("""
+            services:
+              app:
+                image: alpine
+                develop:
+                  watch:
+                    - path: ./src
+                      action: sync
+                      target: /app
+                      ignore: [node_modules]
+                    - path: ./Dockerfile
+                      action: rebuild
+            """)
+
+        let app = try #require(result.service(named: "app"))
+        let rules = try #require(app.develop?.watch)
+        #expect(rules.count == 2)
+        #expect(rules[0].watchAction == .sync)
+        #expect(rules[0].target == "/app")
+        #expect(rules[0].ignore == ["node_modules"])
+        #expect(rules[1].watchAction == .rebuild)
+    }
+
+    @Test("sync+restart is recognized")
+    func syncRestartAction() throws {
+        let result = try plan("""
+            services:
+              app:
+                image: alpine
+                develop:
+                  watch:
+                    - path: ./src
+                      action: sync+restart
+                      target: /app
+            """)
+        let app = try #require(result.service(named: "app"))
+        #expect(try #require(app.develop?.watch).first?.watchAction == .syncRestart)
+    }
+
+    @Test("An unrecognized action decodes but reports no usable watchAction")
+    func unknownActionSurfaces() throws {
+        let result = try plan("""
+            services:
+              app:
+                image: alpine
+                develop:
+                  watch:
+                    - path: ./src
+                      action: teleport
+            """)
+        let app = try #require(result.service(named: "app"))
+        let rule = try #require(app.develop?.watch).first
+        #expect(rule?.action == "teleport")
+        #expect(rule?.watchAction == nil)
+    }
+
+    @Test("develop participates in the config hash")
+    func developAffectsHash() throws {
+        let withWatch = try plan("""
+            services:
+              app:
+                image: alpine
+                develop:
+                  watch:
+                    - path: ./src
+                      action: sync
+                      target: /app
+            """)
+        let without = try plan("""
+            services:
+              app: { image: alpine }
+            """)
+        let hashWith = try #require(withWatch.service(named: "app")).configHash
+        let hashWithout = try #require(without.service(named: "app")).configHash
+        #expect(hashWith != hashWithout)
+    }
+}
