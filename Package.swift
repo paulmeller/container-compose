@@ -9,6 +9,7 @@ let package = Package(
         // CLI added later is one consumer of this, not the other way round.
         .library(name: "ComposeCore", targets: ["ComposeCore"]),
         .library(name: "ComposeEngine", targets: ["ComposeEngine"]),
+        .library(name: "ComposeContainerRuntime", targets: ["ComposeContainerRuntime"]),
     ],
     dependencies: [
         .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.0")
@@ -38,6 +39,27 @@ let package = Package(
         .testTarget(
             name: "ComposeEngineTests",
             dependencies: ["ComposeEngine", "ComposeCore"]
+        ),
+
+        // A RuntimeAdapter for Apple's `container` CLI. Deliberately its own
+        // target, not folded into ComposeEngine: the protocol is
+        // runtime-agnostic, and keeping the one implementation that shells out
+        // and parses process output separate is what would let a second
+        // runtime (or a test double for a different one) be added without
+        // touching Engine at all.
+        .target(
+            name: "ComposeContainerRuntime",
+            dependencies: ["ComposeCore", "ComposeEngine"]
+        ),
+
+        // Exercises ContainerRuntimeAdapter against a REAL `container` daemon.
+        // Everything upstream of this target is proven with fakes in
+        // milliseconds; this is the one place that has to be true against the
+        // real thing, because it is the one place a wrong assumption about the
+        // runtime's actual behavior would hide.
+        .testTarget(
+            name: "ComposeContainerRuntimeLiveTests",
+            dependencies: ["ComposeContainerRuntime", "ComposeEngine", "ComposeCore"]
         ),
     ]
 )
