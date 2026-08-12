@@ -11,6 +11,7 @@
 import Testing
 import Foundation
 import ComposeCore
+import ComposeTestSupport
 @testable import ComposeEngine
 
 @Suite("Engine.up")

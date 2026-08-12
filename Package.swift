@@ -10,6 +10,8 @@ let package = Package(
         .library(name: "ComposeCore", targets: ["ComposeCore"]),
         .library(name: "ComposeEngine", targets: ["ComposeEngine"]),
         .library(name: "ComposeContainerRuntime", targets: ["ComposeContainerRuntime"]),
+        .library(name: "ComposeProtocol", targets: ["ComposeProtocol"]),
+        .executable(name: "container-compose-protocol", targets: ["container-compose-protocol"]),
     ],
     dependencies: [
         .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.0")
@@ -38,7 +40,7 @@ let package = Package(
         ),
         .testTarget(
             name: "ComposeEngineTests",
-            dependencies: ["ComposeEngine", "ComposeCore"]
+            dependencies: ["ComposeEngine", "ComposeCore", "ComposeTestSupport"]
         ),
 
         // A RuntimeAdapter for Apple's `container` CLI. Deliberately its own
@@ -60,6 +62,39 @@ let package = Package(
         .testTarget(
             name: "ComposeContainerRuntimeLiveTests",
             dependencies: ["ComposeContainerRuntime", "ComposeEngine", "ComposeCore"]
+        ),
+
+        // An in-memory RuntimeAdapter, public and its own target (not inside a
+        // test target) specifically so more than one test target can import
+        // it — a type defined inside one test target is not importable from
+        // another.
+        .target(
+            name: "ComposeTestSupport",
+            dependencies: ["ComposeCore", "ComposeEngine"]
+        ),
+
+        // The wire contract for non-Swift consumers: a flat, tagged
+        // ProtocolMessage per event, and the request-execution logic that
+        // produces a stream of them. Deliberately NOT the same shape as
+        // EngineEvent — a hand-rolled cross-language wire format is a
+        // decision to hold steady, not a serialization of whatever the
+        // internal Swift type happens to look like today.
+        .target(
+            name: "ComposeProtocol",
+            dependencies: ["ComposeCore", "ComposeEngine", "ComposeContainerRuntime"]
+        ),
+        .testTarget(
+            name: "ComposeProtocolTests",
+            dependencies: ["ComposeProtocol", "ComposeTestSupport"]
+        ),
+
+        // The actual binary a non-Swift process (Port Authority, in Zig)
+        // spawns. Deliberately thin: argv parsing and NDJSON writing only —
+        // every decision of substance lives in ComposeProtocol, where it is
+        // unit-testable without spawning a process at all.
+        .executableTarget(
+            name: "container-compose-protocol",
+            dependencies: ["ComposeProtocol", "ComposeContainerRuntime"]
         ),
     ]
 )

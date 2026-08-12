@@ -18,17 +18,25 @@ public actor Engine {
         self.adapter = adapter
     }
 
-    /// Reconciles `plan` against observed reality and returns the full event
-    /// stream as an array.
+    /// Reconciles `plan` against observed reality, executes the result, and
+    /// returns the full event stream as an array.
     ///
-    /// An array rather than `AsyncStream` at this layer: the ordering and
-    /// content of events is what's being tested, and asserting on an array is
-    /// direct. A streaming entry point for real consumers (CLI progress, a
-    /// GUI updating live) is a thin wrapper added when something needs it —
-    /// this is the contract that wrapper has to honor.
+    /// - Parameter onEvent: Called synchronously as each event is produced —
+    ///   not after the operation completes. This is what makes the protocol
+    ///   layer's NDJSON output real progress rather than a batch dump at the
+    ///   end: a slow image pull for one service does not hold up the
+    ///   already-available progress of another running concurrently in the
+    ///   same wave. The returned array remains the complete, ordered record —
+    ///   existing callers that only need the final result are unaffected.
     @discardableResult
-    public func up(_ plan: Plan) async -> [EngineEvent] {
-        var events: [EngineEvent] = [.planned(services: plan.services.map(\.name), waves: plan.waves)]
+    public func up(_ plan: Plan, onEvent: (@Sendable (EngineEvent) -> Void)? = nil) async -> [EngineEvent] {
+        var events: [EngineEvent] = []
+        func emit(_ event: EngineEvent) {
+            events.append(event)
+            onEvent?(event)
+        }
+
+        emit(.planned(services: plan.services.map(\.name), waves: plan.waves))
 
         let observed = (try? await adapter.observe(projectName: plan.projectName)) ?? []
         let waves = Reconciler.plan(desired: plan, observed: observed)
@@ -46,7 +54,7 @@ public actor Engine {
                 // outside, and a consumer cannot tell whether retrying THIS
                 // service alone would help.
                 for action in wave {
-                    events.append(.serviceSkipped(service: action.service.name, reason: .dependencyFailed))
+                    emit(.serviceSkipped(service: action.service.name, reason: .dependencyFailed))
                     skipped.append(action.service.name)
                 }
                 continue
@@ -54,12 +62,16 @@ public actor Engine {
 
             // Actions within a wave have no ordering constraint on each other
             // by construction (that is what makes them a wave), so they run
-            // concurrently. Collecting into an array preserves this method's
-            // event-array contract while still executing in parallel.
+            // concurrently, and each fires `onEvent` directly as its own steps
+            // happen — a fast service's events are not held back by a slow one
+            // in the same wave. The per-action event lists returned here are
+            // used only to rebuild the final ordered array, since task
+            // completion order is not deterministic and the array contract
+            // must be.
             let results = await withTaskGroup(of: (String, [EngineEvent], Bool).self) { group in
                 for action in wave {
                     group.addTask {
-                        await self.executeCollectingEvents(action, projectName: plan.projectName)
+                        await self.executeCollectingEvents(action, projectName: plan.projectName, onEvent: onEvent)
                     }
                 }
                 var collected: [(String, [EngineEvent], Bool)] = []
@@ -67,16 +79,17 @@ public actor Engine {
                 return collected
             }
 
-            // Sorted by service name for deterministic event ordering — the
-            // task group above completes in whatever order the I/O finishes,
-            // and non-deterministic event order would make this untestable.
+            // Sorted by service name for deterministic ordering in the
+            // RETURNED array — onEvent above already fired in real completion
+            // order, which is the live-progress signal; this is the stable
+            // record for callers asserting on the array afterward.
             for (name, serviceEvents, succeeded) in results.sorted(by: { $0.0 < $1.0 }) {
                 events.append(contentsOf: serviceEvents)
                 if succeeded { ready.append(name) } else { failed.append(name); upstreamFailed = true }
             }
         }
 
-        events.append(.done(success: failed.isEmpty, ready: ready, failed: failed, skipped: skipped))
+        emit(.done(success: failed.isEmpty, ready: ready, failed: failed, skipped: skipped))
         return events
     }
 
@@ -85,9 +98,15 @@ public actor Engine {
     /// currently running for this project should stop", regardless of what
     /// the compose file says today.
     @discardableResult
-    public func down(projectName: String, remove: Bool) async -> [EngineEvent] {
+    public func down(projectName: String, remove: Bool, onEvent: (@Sendable (EngineEvent) -> Void)? = nil) async -> [EngineEvent] {
+        var events: [EngineEvent] = []
+        func emit(_ event: EngineEvent) {
+            events.append(event)
+            onEvent?(event)
+        }
+
         let observed = (try? await adapter.observe(projectName: projectName)) ?? []
-        var events: [EngineEvent] = [.planned(services: observed.map(\.service), waves: [observed.map(\.service)])]
+        emit(.planned(services: observed.map(\.service), waves: [observed.map(\.service)]))
 
         var ready: [String] = []
         var failed: [String] = []
@@ -95,7 +114,7 @@ public actor Engine {
         let results = await withTaskGroup(of: (String, [EngineEvent], Bool).self) { group in
             for container in observed {
                 group.addTask {
-                    await self.executeTeardown(container, remove: remove)
+                    await self.executeTeardown(container, remove: remove, onEvent: onEvent)
                 }
             }
             var collected: [(String, [EngineEvent], Bool)] = []
@@ -108,80 +127,102 @@ public actor Engine {
             if succeeded { ready.append(name) } else { failed.append(name) }
         }
 
-        events.append(.done(success: failed.isEmpty, ready: ready, failed: failed, skipped: []))
+        emit(.done(success: failed.isEmpty, ready: ready, failed: failed, skipped: []))
         return events
     }
 
     // MARK: - Execution
 
-    private func executeCollectingEvents(_ action: ReconcileAction, projectName: String) async -> (String, [EngineEvent], Bool) {
+    private func executeCollectingEvents(
+        _ action: ReconcileAction,
+        projectName: String,
+        onEvent: (@Sendable (EngineEvent) -> Void)?
+    ) async -> (String, [EngineEvent], Bool) {
         var events: [EngineEvent] = []
         let name = action.service.name
+        func emit(_ event: EngineEvent) {
+            events.append(event)
+            onEvent?(event)
+        }
 
         do {
             switch action {
             case .unchanged(let service, let containerID):
-                events.append(.serviceReady(service: service.name, containerID: containerID, reused: true))
+                emit(.serviceReady(service: service.name, containerID: containerID, reused: true))
 
             case .start(let service, let containerID):
-                events.append(.serviceState(service: name, state: .starting, detail: nil))
+                emit(.serviceState(service: name, state: .starting, detail: nil))
                 try await adapter.startContainer(id: containerID)
-                try await waitHealthyIfNeeded(service, containerID: containerID, events: &events)
-                events.append(.serviceReady(service: name, containerID: containerID, reused: false))
+                try await waitHealthyIfNeeded(service, containerID: containerID, emit: emit)
+                emit(.serviceReady(service: name, containerID: containerID, reused: false))
 
             case .create(let service):
                 if let image = service.image {
-                    events.append(.serviceState(service: name, state: .pulling, detail: image))
+                    emit(.serviceState(service: name, state: .pulling, detail: image))
                     try await adapter.ensureImage(image)
                 }
-                events.append(.serviceState(service: name, state: .creating, detail: nil))
+                emit(.serviceState(service: name, state: .creating, detail: nil))
                 let containerID = try await adapter.createContainer(for: service, projectName: projectName)
-                events.append(.serviceState(service: name, state: .starting, detail: nil))
+                emit(.serviceState(service: name, state: .starting, detail: nil))
                 try await adapter.startContainer(id: containerID)
-                try await waitHealthyIfNeeded(service, containerID: containerID, events: &events)
-                events.append(.serviceReady(service: name, containerID: containerID, reused: false))
+                try await waitHealthyIfNeeded(service, containerID: containerID, emit: emit)
+                emit(.serviceReady(service: name, containerID: containerID, reused: false))
 
             case .recreate(let service, let containerID, let reason):
-                events.append(.serviceState(service: name, state: .recreating, detail: reason))
+                emit(.serviceState(service: name, state: .recreating, detail: reason))
                 try await adapter.stopContainer(id: containerID)
                 try await adapter.deleteContainer(id: containerID, force: true)
                 if let image = service.image {
-                    events.append(.serviceState(service: name, state: .pulling, detail: image))
+                    emit(.serviceState(service: name, state: .pulling, detail: image))
                     try await adapter.ensureImage(image)
                 }
-                events.append(.serviceState(service: name, state: .creating, detail: nil))
+                emit(.serviceState(service: name, state: .creating, detail: nil))
                 let newID = try await adapter.createContainer(for: service, projectName: projectName)
-                events.append(.serviceState(service: name, state: .starting, detail: nil))
+                emit(.serviceState(service: name, state: .starting, detail: nil))
                 try await adapter.startContainer(id: newID)
-                try await waitHealthyIfNeeded(service, containerID: newID, events: &events)
-                events.append(.serviceReady(service: name, containerID: newID, reused: false))
+                try await waitHealthyIfNeeded(service, containerID: newID, emit: emit)
+                emit(.serviceReady(service: name, containerID: newID, reused: false))
             }
             return (name, events, true)
         } catch {
-            events.append(.serviceFailed(service: name, reason: "\(error)"))
+            emit(.serviceFailed(service: name, reason: "\(error)"))
             return (name, events, false)
         }
     }
 
-    private func executeTeardown(_ container: ObservedContainer, remove: Bool) async -> (String, [EngineEvent], Bool) {
-        var events: [EngineEvent] = [.serviceState(service: container.service, state: .stopping, detail: nil)]
+    private func executeTeardown(
+        _ container: ObservedContainer,
+        remove: Bool,
+        onEvent: (@Sendable (EngineEvent) -> Void)?
+    ) async -> (String, [EngineEvent], Bool) {
+        var events: [EngineEvent] = []
+        func emit(_ event: EngineEvent) {
+            events.append(event)
+            onEvent?(event)
+        }
+
+        emit(.serviceState(service: container.service, state: .stopping, detail: nil))
         do {
             try await adapter.stopContainer(id: container.containerID)
             if remove {
-                events.append(.serviceState(service: container.service, state: .removing, detail: nil))
+                emit(.serviceState(service: container.service, state: .removing, detail: nil))
                 try await adapter.deleteContainer(id: container.containerID, force: true)
             }
-            events.append(.serviceReady(service: container.service, containerID: container.containerID, reused: false))
+            emit(.serviceReady(service: container.service, containerID: container.containerID, reused: false))
             return (container.service, events, true)
         } catch {
-            events.append(.serviceFailed(service: container.service, reason: "\(error)"))
+            emit(.serviceFailed(service: container.service, reason: "\(error)"))
             return (container.service, events, false)
         }
     }
 
-    private func waitHealthyIfNeeded(_ service: PlannedService, containerID: String, events: inout [EngineEvent]) async throws {
+    private func waitHealthyIfNeeded(
+        _ service: PlannedService,
+        containerID: String,
+        emit: (EngineEvent) -> Void
+    ) async throws {
         guard let healthcheck = service.healthcheck, !healthcheck.disabled else { return }
-        events.append(.serviceState(service: service.name, state: .waitingForHealthy, detail: nil))
+        emit(.serviceState(service: service.name, state: .waitingForHealthy, detail: nil))
         try await adapter.waitForHealthy(containerID: containerID, healthcheck: healthcheck)
     }
 }

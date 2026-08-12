@@ -449,7 +449,12 @@ public struct Planner: Sendable {
         }
     }
 
-    static func parseEnvFile(_ contents: String) -> [String: String] {
+    /// Parses `.env`-file syntax (`KEY=value`, `#` comments, blank lines,
+    /// matching surrounding quotes stripped as delimiters). Public: the
+    /// project-level `.env` a consumer loads before calling `plan` uses
+    /// exactly the same syntax as a service's `env_file:`, and duplicating
+    /// this parser at the call site would be the same logic maintained twice.
+    public static func parseEnvFile(_ contents: String) -> [String: String] {
         var result: [String: String] = [:]
         for line in contents.split(separator: "\n", omittingEmptySubsequences: false) {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
