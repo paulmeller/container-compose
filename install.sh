@@ -2,26 +2,23 @@
 #
 # container-compose installer.
 #
-# Builds release binaries from source and installs them onto PATH — there
-# is no hosted release yet (see docs/DESIGN.md's Naming section: the
-# distributed binary name still needs to be settled before any public
-# release, since it collides with an unrelated existing project's Homebrew
-# formula), so this is a local source install, the same shape as
-# `cargo install --path .` or `go install`, not a "curl a prebuilt binary"
-# installer.
+# Builds a release binary from source and installs it onto PATH. This is a
+# local source install, the same shape as `cargo install --path .` or
+# `go install` — for a proper package-manager install, use the Homebrew tap
+# instead: `brew tap paulmeller/container-compose && brew install
+# container-compose`. This script is for iterating on a local checkout
+# without waiting on a tap update.
 #
-# Installs two binaries:
-#   container-compose             the CLI you type in a terminal
-#   container-compose-protocol    the NDJSON binary a non-Swift process
-#                                  (Port Authority's Projects section,
-#                                  or any other consumer) spawns by name —
-#                                  keeps its build name; nothing spawns it
-#                                  under any other one.
+# Installs one binary, container-compose, which both a human terminal and a
+# non-Swift process (Port Authority's Projects section, or any other
+# consumer) use — the latter via `container-compose --format ndjson ...`.
+# See ProtocolRequest.extractFormat's doc comment for why this is one binary
+# with a flag rather than two separate ones.
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CLI_NAME="container-compose"
+BIN_NAME="container-compose"
 
 echo "==> Checking prerequisites"
 
@@ -35,16 +32,14 @@ if ! command -v container >/dev/null 2>&1; then
     echo "         container-compose needs it at runtime (not to build this) — see https://github.com/apple/container" >&2
 fi
 
-echo "==> Building release binaries (this can take a minute or two)"
+echo "==> Building the release binary (this can take a minute or two)"
 cd "$REPO_ROOT"
-swift build -c release --product container-compose-cli
-swift build -c release --product container-compose-protocol
+swift build -c release --product container-compose
 
-CLI_BIN="$REPO_ROOT/.build/release/container-compose-cli"
-PROTOCOL_BIN="$REPO_ROOT/.build/release/container-compose-protocol"
+BIN="$REPO_ROOT/.build/release/container-compose"
 
-if [[ ! -x "$CLI_BIN" || ! -x "$PROTOCOL_BIN" ]]; then
-    echo "error: build did not produce the expected binaries at .build/release/" >&2
+if [[ ! -x "$BIN" ]]; then
+    echo "error: build did not produce the expected binary at .build/release/container-compose" >&2
     exit 1
 fi
 
@@ -60,23 +55,21 @@ else
     exit 1
 fi
 
-if [[ -e "$INSTALL_DIR/$CLI_NAME" ]]; then
-    echo "==> Replacing existing $INSTALL_DIR/$CLI_NAME"
+if [[ -e "$INSTALL_DIR/$BIN_NAME" ]]; then
+    echo "==> Replacing existing $INSTALL_DIR/$BIN_NAME"
 fi
 
 echo "==> Installing to $INSTALL_DIR"
-install -m 755 "$CLI_BIN" "$INSTALL_DIR/$CLI_NAME"
-install -m 755 "$PROTOCOL_BIN" "$INSTALL_DIR/container-compose-protocol"
+install -m 755 "$BIN" "$INSTALL_DIR/$BIN_NAME"
 
 echo ""
-echo "Installed:"
-echo "  $INSTALL_DIR/$CLI_NAME"
-echo "  $INSTALL_DIR/container-compose-protocol"
+echo "Installed: $INSTALL_DIR/$BIN_NAME"
 echo ""
 
-if ! command -v "$CLI_NAME" >/dev/null 2>&1; then
+if ! command -v "$BIN_NAME" >/dev/null 2>&1; then
     echo "warning: $INSTALL_DIR does not appear to be on your PATH yet."
     echo "         add it to your shell profile, e.g.: export PATH=\"$INSTALL_DIR:\$PATH\""
 else
-    echo "Try it: $CLI_NAME capabilities"
+    echo "Try it: $BIN_NAME capabilities"
+    echo "For a machine consumer (e.g. Port Authority): $BIN_NAME --format ndjson ps --file compose.yml --project myapp"
 fi
