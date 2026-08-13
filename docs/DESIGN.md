@@ -1,19 +1,19 @@
-# container-compose — design thesis
+# container-compose — design
 
-## The thesis in one paragraph
+## The design in one paragraph
 
-Every Compose implementation for Apple's `container` runtime is **CLI-shaped**:
-it prints prose, blocks, and exits. Anything that wants to *drive* Compose —
-a GUI, an IDE plugin, a CI system, an agent — has two bad options: screen-scrape
-human output, or reimplement the translation itself. Both happen today. This
-project inverts the shape: the **engine is the product**, the CLI is one
-consumer of it, and the machine contract is the primary interface rather than an
+The **engine is the product**; the CLI is one consumer of it. A pure planning
+layer turns a compose file into an immutable `Plan`, a reconciling execution
+engine emits typed events rather than printing, and a process-level protocol
+lets non-Swift consumers drive all of it without linking Swift at all.
+Anything that needs to *drive* Compose — a GUI, an IDE plugin, a CI system, an
+agent — talks to that machine contract as the primary interface, not as an
 afterthought bolted on with a `--json` flag.
 
-## Why a GUI-first engine is shaped differently
+## Why an engine is shaped differently from a CLI
 
-These are not stylistic preferences. Each one is a place where CLI assumptions
-actively break an embedding consumer.
+These are not stylistic preferences. Each one is a place where CLI-shaped
+assumptions actively break an embedding consumer.
 
 | Concern | CLI assumption | What an engine needs |
 |---|---|---|
@@ -25,12 +25,12 @@ actively break an embedding consumer.
 | **Intent** | `up` means "recreate" | **Reconcile**: make reality match the file, touching only what differs |
 | **Capabilities** | Discover limits by hitting them | Expose **what this runtime can and cannot do** as data |
 
-The last row is the one nobody does, and it comes straight from measurement: of
-~95 Compose service keys, roughly 40 are expressible on this runtime, ~4 parse
-but can never function (`restart`, `configs`, `secrets`, most of `deploy`), and
-the rest have no equivalent at all. Today you discover that by reading warnings
-in a terminal. An engine should let a GUI grey out the unsupported control and
-explain why, before the user commits.
+The last row comes straight from measurement: of ~95 Compose service keys,
+roughly 40 are expressible on this runtime, ~4 parse but can never function
+(`restart`, `configs`, `secrets`, most of `deploy`), and the rest have no
+equivalent at all. Surfacing that as data lets a GUI grey out an unsupported
+control and explain why, before the user commits — rather than leaving them to
+discover it by hitting the limit at runtime.
 
 ## Layering
 
@@ -55,8 +55,9 @@ Four layers, each with a rule about what it may not do.
 **Core** is pure: a compose document in, a `Plan` out. Interpolation, `extends`
 resolution, profile gating, dependency ordering, and the mapping to runtime
 arguments all live here, and none of it touches the filesystem, the network, or
-the clock. This is what makes the hard parts testable without a daemon — today's
-equivalent logic can only be tested by starting real containers.
+the clock. This is what makes the hard parts testable without a daemon: the
+translation logic can be exercised in milliseconds, with no containers started
+at all.
 
 **Engine** is the only layer that performs I/O. It takes a `Plan`, reconciles it
 against observed reality, and emits events. It never prints.
@@ -70,6 +71,109 @@ Swift-only API would have failed its actual use case on day one.
 and has no privileged access: **if the CLI needs something the protocol does not
 expose, the protocol is wrong.** That constraint is the main defense against the
 engine quietly regrowing a CLI-shaped bias.
+
+## Source layout
+
+```
+Sources/
+  ComposeCore/                compose document -> immutable Plan, and the pure
+                               Reconciler. No I/O anywhere in this target.
+  ComposeEngine/               executes a Plan: observe, reconcile, execute,
+                               emit a live event stream (not batched).
+  ComposeContainerRuntime/    RuntimeAdapter for Apple's `container` CLI.
+  ComposeTestSupport/         FakeRuntimeAdapter, shared by every test target
+                               that needs to drive Engine without a daemon.
+  ComposeProtocol/             the wire contract: ProtocolMessage (flat, tagged,
+                               NOT a serialization of EngineEvent's Swift
+                               shape), ProtocolRunner (resolves a request into
+                               a Plan and executes it), and
+                               ProtocolRequest.extractFormat (the global
+                               `--format text|ndjson` flag, order-independent,
+                               parsed separately from the per-command argv).
+  ComposeCLIKit/               formats a ProtocolMessage stream as human-
+                               readable text — the `--format text` path.
+  container-compose/          the one binary. ~40 lines: argv -> a format
+                               plus a ProtocolRequest, run it, print each
+                               ProtocolMessage either as NDJSON or through
+                               CLIRenderer depending on `--format`, exit code
+                               from the runner. Line-buffered explicitly —
+                               block buffering would turn "streaming" into
+                               "dumped at exit". A human terminal and a
+                               non-Swift process (Port Authority) are both
+                               just callers of this SAME binary with a
+                               different flag, not two build targets —
+                               proof by construction that `--format text`
+                               has no capability `--format ndjson` lacks.
+Tests/
+  ComposeCoreTests/            76 tests, ~15ms. No daemon — includes a
+                               real-filesystem suite (temp dirs, no
+                               InMemoryProvider) specifically so path
+                               resolution can't hide behind that fake's
+                               deliberately lenient basename fallback.
+  ComposeEngineTests/          26 tests against the in-memory fake, ~1s
+                               (dominated by one deliberate `wait` timeout).
+  ComposeProtocolTests/        68 tests, request parsing + wire mapping + full
+                               runs against the fake — no process spawn —
+                               plus DirectoryWatcher's own suite, against
+                               real temp directories and real kqueue events.
+  ComposeCLIKitTests/          20 tests of pure rendering logic.
+  ComposeContainerRuntimeLiveTests/
+                               14 tests against a REAL `container` daemon —
+                               the one place a wrong runtime assumption
+                               could hide from every test above it. Caught
+                               three live-only bugs this way: a one-off
+                               `run` container colliding with the managed
+                               one, `./`-prefixed watch paths truncating
+                               synced filenames, and uppercase project
+                               names producing an invalid OCI image tag.
+```
+
+## Command routing
+
+25 subcommands, routed one of two ways
+(`ComposeProtocol/ProtocolRunner.swift` has the exact split):
+
+- **Engine-owned** (need `Reconciler` and/or concurrent multi-service
+  orchestration with the typed event stream): `up`, `down`, `build`, `pull`,
+  `push`, `start`, `stop`, `restart`, `kill`, `rm`, `wait`.
+- **Direct to the adapter** (act on an already-existing single container, or
+  are pure observation — routing them through Engine's reconcile-and-wave
+  machinery would buy nothing): `ps`, `ls`, `images`, `port`, `config`,
+  `logs`, `top`, `stats`, `cp`, `export`, `watch`.
+- **Passthrough exception**: `exec`, `run` — inherited-stdio process
+  execution, never NDJSON, since a live terminal session cannot be expressed
+  as line-delimited JSON without breaking it — documented at
+  `RuntimeAdapter.execPassthrough`.
+
+`watch` is event-driven: `DirectoryWatcher` (`ComposeProtocol`, one
+kqueue-backed `DispatchSourceFileSystemObject` per directory, recursive,
+debounced) triggers a rescan on real filesystem activity, with a 5s
+safety-net rescan alongside it for the one thing directory-level watching
+can't see (a same-inode in-place write with no rename). A rescan diffs via
+`WatchPlanner` (`ComposeCore`, pure snapshot diffing) and syncs,
+syncs-and-restarts, or rebuilds-and-recreates per rule.
+
+## How the reconciliation claim is tested
+
+The claim above — an already-correct, already-running container is left
+alone — is provable in layers:
+
+- `Reconciler` (in `ComposeCore`) is a pure function — `(Plan, [ObservedContainer]) -> [ReconcileAction]`
+  — tested in milliseconds with no runtime involved at all.
+- `Engine` is tested against an in-memory `FakeRuntimeAdapter`, so its
+  orchestration (wave sequencing, concurrency, event ordering, the
+  skip-vs-fail distinction) is proven without a daemon either.
+- `ComposeContainerRuntimeLiveTests` runs the *same* `Engine` against the real
+  `ContainerRuntimeAdapter` and a live daemon, and asserts the thing that
+  actually matters: run `up` twice, and the second run reports `reused: true`
+  with the identical container — verified against the event stream and
+  independently against `container ls`.
+- The same claim is verified a second time across the actual process
+  boundary the project exists to serve: a plain Python script (no Swift, no
+  shared code) spawns `container-compose --format ndjson`, parses NDJSON
+  line by line, and asserts `reused: true` on the second `up`. This is the
+  proof that matters for the motivating case — Port Authority is Zig and
+  cannot link a Swift library at all.
 
 ## The contract
 
@@ -128,13 +232,13 @@ Scope discipline, stated up front:
 
 ## Reconciliation
 
-The behavioral centerpiece, and the sharpest break from CLI semantics.
+The behavioral centerpiece.
 
-`up` today unconditionally stops and deletes existing containers, then recreates
-them — there is no "ensure running". For a GUI that polls or a user who clicks
-Start twice, that is destructive and slow.
+A "recreate everything, always" `up` is destructive and slow for a GUI that
+polls, or for a user who clicks Start twice. What is needed is "ensure
+running".
 
-The engine's primitive is instead: **given this desired state and this observed
+So the engine's primitive is: **given this desired state and this observed
 state, what is the minimal set of actions?**
 
 - Container absent → create and start
@@ -145,28 +249,17 @@ state, what is the minimal set of actions?**
 "Config changed" is decidable because the plan is a value: hash the resolved
 service definition, store it as a label, compare on the next reconcile.
 
-## What is reused, and what is not
+## Runtime facts worth writing down
 
-Stated plainly, because it bears on authorship.
+Behaviors of Apple's `container` runtime that shaped the adapter, and that are
+easy to lose an afternoon to:
 
-**Not reused:** no code is copied. The architecture above — pure core, event
-stream, protocol layer, capability manifest, reconciliation — is a different
-design from any existing implementation, all of which are CLI-first.
-
-**Reused:** hard-won knowledge about the runtime, gathered by building the fork
-that preceded this. That the runtime has no `--restart` and no `--add-host`;
-that `/etc/hosts` cross-patching is the workable DNS fallback; that
-`container ls --format json` carries compose labels; that `nslookup` bypasses
-`/etc/hosts` and misleads anyone testing DNS. Facts about a third-party runtime
-are not anyone's intellectual property, and rediscovering them by hand would
-help no one.
-
-**Attribution:** the prior fork of
-[Container-Compose](https://github.com/Mcrich23/Container-Compose) (MIT) remains
-separate and keeps its notices. Fixes made there that stand on their own —
-notably `down` removing containers, and consistent `${VAR}` interpolation —
-should be upstreamed regardless of this project's outcome. That is the honest
-move and costs nothing.
+- There is no `--restart` flag and no `--add-host`.
+- `/etc/hosts` cross-patching is the workable DNS fallback.
+- `container ls --format json` carries compose labels, which is what makes
+  observation (and therefore reconciliation) possible at all.
+- `nslookup` bypasses `/etc/hosts` entirely, so it will happily mislead anyone
+  using it to test DNS.
 
 ## Sequencing
 
@@ -180,12 +273,26 @@ Each step is independently useful, and none is wasted if the next is abandoned.
 6. **Port Authority integration** — the real consumer, and the honest test of
    whether any of this was shaped correctly.
 
+## Status
+
+Core, Engine, the real adapter, the protocol layer and a CLI all exist and
+are tested end to end, including from a genuinely non-Swift consumer, with
+the full command surface above wired through every layer. Port Authority
+(the Zig GUI that motivated the protocol layer in the first place) has a
+Projects section that spawns `container-compose --format ndjson` and drives
+it — the last item in the sequencing above, and the real test of whether any
+of this was shaped correctly. It lives on a branch there, not yet merged or
+visually verified interactively (only through its own test suite and a clean
+process launch), since that verification happens in that project's own repo.
+
 ## Naming
 
 The project is named `container-compose`.
 
-Note for release planning: an unrelated MIT project of the same name exists
-(`Mcrich23/Container-Compose`), and ships a `container-compose` binary via
-Homebrew. Publishing under this name would collide with it at the binary and
-formula level, so the *distributed* name needs to differ even though the
-project name does not. Worth settling before any public release, not after.
+Note for release planning: a same-named formula already exists on Homebrew
+for an unrelated project, and colliding with it has already caused real
+problems once — a bare `brew install container-compose` silently fell back to
+the other formula via Homebrew's tap-trust behavior instead of installing
+this one. The *distributed* name likely needs to differ from the project
+name even if the project name does not change. Worth settling before any
+public release, not after.

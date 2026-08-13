@@ -87,8 +87,8 @@ public struct ContainerRuntimeAdapter: RuntimeAdapter {
         let entries = (try? JSONDecoder().decode([WireImageEntry].self, from: data)) ?? []
         // Matches on exact reference, a registry-qualified form of it
         // (`docker.io/library/nginx:latest` for `nginx:latest`), or the final
-        // path component — the same three-way check the fork's tooling used,
-        // since the runtime is not consistent about which form it stores.
+        // path component, since the runtime is not consistent about which
+        // form it stores.
         return entries.contains { entry in
             entry.reference == image
                 || entry.reference.hasSuffix("/\(image)")
