@@ -251,6 +251,34 @@ struct TranslateTests {
         }
     }
 
+    @Test("A bare reference alongside a ported declaration keeps the port")
+    func bareReferenceInheritsThePort() async throws {
+        try await withTempDirectory { directory in
+            let composePath = directory + "/compose.yml"
+            // Exactly n8n's shape: declared with a port, referenced without.
+            try write(
+                """
+                services:
+                  n8n:
+                    image: n8nio/n8n
+                    environment:
+                      - SERVICE_URL_N8N_5678
+                      - WEBHOOK_URL=${SERVICE_URL_N8N}
+                """,
+                to: composePath
+            )
+
+            await translate(composePath: composePath)
+            let values = envValues(at: directory + "/.env")
+
+            // Generating the bare form independently yields "http://localhost",
+            // silently dropping the port — every webhook would then point at
+            // the wrong address, and nothing would say so.
+            #expect(values["SERVICE_URL_N8N"] == "http://localhost:5678")
+            #expect(values["SERVICE_URL_N8N_5678"] == "http://localhost:5678")
+        }
+    }
+
     @Test("Same name on two ports gets a value for each")
     func multiplePortsEachGetAValue() async throws {
         try await withTempDirectory { directory in

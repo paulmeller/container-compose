@@ -374,29 +374,40 @@ public struct ProtocolRunner: Sendable {
         var generated: [String] = []
         var kept: [String] = []
 
-        // Every spelling the document uses gets a value, including each port
-        // of a name exposed on more than one.
-        for variable in variables {
-            let name = variable.declaredName
-            if !force, let current = existing[name], !current.isEmpty {
-                kept.append(name)
-            } else {
-                resolved[name] = variable.generatedValue(using: &generator)
-                generated.append(name)
-            }
-        }
+        // Grouped by base name, because the bare spelling is not independent
+        // of the ported ones. A template declares `SERVICE_URL_N8N_5678` and
+        // then references `${SERVICE_URL_N8N}` meaning the same address —
+        // generating a value for the bare form on its own produces
+        // `http://localhost`, silently dropping the port, and n8n would build
+        // every webhook URL against the wrong one.
+        for (base, group) in Dictionary(grouping: variables, by: \.baseName).sorted(by: { $0.key < $1.key }) {
+            let ported = group.filter { $0.port != nil }.sorted { ($0.port ?? 0) < ($1.port ?? 0) }
 
-        // The bare spelling, for templates that declare `SERVICE_URL_X_3010`
-        // and then reference `$SERVICE_URL_X`. Where a name is exposed on
-        // several ports the lowest is used — arbitrary, but deterministic, and
-        // the alternative is leaving the reference empty. A credential has no
-        // port, so its bare name is already its declared name and this is a
-        // no-op for it.
-        for (base, group) in Dictionary(grouping: variables, by: \.baseName) {
-            guard resolved[base] == nil || force else { continue }
-            let lowest = group.min { ($0.port ?? 0) < ($1.port ?? 0) }
-            guard let canonical = lowest, canonical.declaredName != base else { continue }
-            resolved[base] = resolved[canonical.declaredName]
+            func value(for variable: MagicVariable) {
+                let name = variable.declaredName
+                if !force, let current = existing[name], !current.isEmpty {
+                    kept.append(name)
+                } else {
+                    resolved[name] = variable.generatedValue(using: &generator)
+                    generated.append(name)
+                }
+            }
+
+            // Each declared port keeps its own address.
+            for variable in ported { value(for: variable) }
+
+            // The bare spelling follows the lowest port rather than generating
+            // separately — arbitrary where a name is exposed on several, but
+            // deterministic, and far better than an address pointing nowhere.
+            // With no ported sibling (every credential, and URLs declared
+            // without a port) it is generated normally.
+            if let canonical = ported.first {
+                if force || existing[base]?.isEmpty != false {
+                    resolved[base] = resolved[canonical.declaredName]
+                }
+            } else if let bare = group.first(where: { $0.declaredName == base }) {
+                value(for: bare)
+            }
         }
 
         guard Self.write(envFile: resolved, to: envPath) else {
