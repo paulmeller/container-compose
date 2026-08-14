@@ -222,6 +222,45 @@ public struct MagicVariable: Equatable, Hashable, Sendable {
         String((0..<max(1, length)).map { _ in alphabet[Int.random(in: 0..<alphabet.count, using: &generator)] })
     }
 
+    /// Every generated variable the document READS — `$NAME` or `${NAME}` —
+    /// as opposed to merely declares.
+    ///
+    /// The distinction is the whole point of this being separate from
+    /// `scan`. A bare `- SERVICE_FQDN_X_8080` entry is how these templates
+    /// DECLARE a variable; nothing has gone wrong if it has no value yet.
+    /// A `${SERVICE_PASSWORD_X}` inside another value is a READ, and an
+    /// unfilled one silently becomes an empty password.
+    ///
+    /// Returns the names as written, since that is what a caller looks up
+    /// in its variables — the port-suffixed spelling and the bare one are
+    /// both defined by `translate`, so either resolves.
+    public static func scanReferences(document: String) -> Set<String> {
+        var names: Set<String> = []
+        var characters = Array(document)
+        var index = 0
+
+        while index < characters.count {
+            guard characters[index] == "$" else {
+                index += 1
+                continue
+            }
+            index += 1
+            if index < characters.count, characters[index] == "{" { index += 1 }
+
+            var name = ""
+            while index < characters.count {
+                let character = characters[index]
+                guard character.isLetter || character.isNumber || character == "_" else { break }
+                name.append(character)
+                index += 1
+            }
+            // Only names this module recognises as generated: everything
+            // else is the user's own variable and unset is a normal state.
+            if MagicVariable(declaration: name) != nil { names.insert(name) }
+        }
+        return names
+    }
+
     /// Pulls out anything shaped like a `SERVICE_…` identifier, in any of the
     /// three spellings a compose file can carry it: bare, `$NAME`, `${NAME}`.
     private static func candidateNames(in document: String) -> [String] {

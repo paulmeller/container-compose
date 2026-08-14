@@ -246,3 +246,95 @@ struct MagicVariableTests {
         #expect(ports == [3000, 5003], "every declared port must survive")
     }
 }
+
+@Suite("Unresolved generated variables")
+struct UnresolvedGeneratedVariableTests {
+
+    private func plan(_ document: String, variables: [String: String] = [:]) throws -> Plan {
+        try Planner(files: InMemoryProvider([:])).plan(
+            document: document,
+            options: PlanOptions(projectName: "proj", variables: variables)
+        )
+    }
+
+    @Test("Planning refuses a template whose generated variables were never filled in")
+    func refusesUnresolvedGeneratedVariables() throws {
+        // Without this the references resolve to empty strings and the app
+        // starts with a blank username and password — which looks like a
+        // broken app rather than an unconfigured one, and says nothing
+        // about the step that was missed.
+        let document = """
+            services:
+              app:
+                image: openclaw
+                environment:
+                  - AUTH_USERNAME=$SERVICE_USER_OPENCLAW
+                  - AUTH_PASSWORD=$SERVICE_PASSWORD_OPENCLAW
+            """
+
+        #expect(throws: PlanError.self) { try plan(document) }
+
+        do {
+            _ = try plan(document)
+            Issue.record("expected planning to refuse")
+        } catch let error as PlanError {
+            let text = "\(error)"
+            // The message has to name the fix, not just the problem.
+            #expect(text.contains("translate"))
+            #expect(text.contains("SERVICE_"))
+        }
+    }
+
+    @Test("Values supplied by any means satisfy the check")
+    func suppliedValuesAreAccepted() throws {
+        let document = """
+            services:
+              app:
+                image: openclaw
+                environment:
+                  - AUTH_PASSWORD=$SERVICE_PASSWORD_OPENCLAW
+            """
+        // `translate` writes these into a .env, but the check is about
+        // whether a value EXISTS — set it in the shell and it is just as
+        // resolved.
+        let result = try plan(document, variables: ["SERVICE_PASSWORD_OPENCLAW": "hunter2"])
+        let app = try #require(result.service(named: "app"))
+        #expect(app.environment["AUTH_PASSWORD"] == "hunter2")
+    }
+
+    @Test("A variable that only looks generated is left to the user")
+    func nonGeneratedVariablesAreNotChecked() throws {
+        // SERVICE_OPENAI_API_KEY holds the user's own key: unset is a
+        // normal state that Compose already reports its own way, and
+        // refusing to plan over it would be this check overreaching.
+        let document = """
+            services:
+              app:
+                image: openclaw
+                environment:
+                  - OPENAI_API_KEY=${SERVICE_OPENAI_API_KEY}
+                  - PLAIN=${SOME_OTHER_VARIABLE}
+            """
+        let result = try plan(document)
+        let app = try #require(result.service(named: "app"))
+        #expect(app.environment["OPENAI_API_KEY"] == "")
+    }
+
+    @Test("A bare declaration alone does not trip the check")
+    func bareDeclarationIsNotAReference() throws {
+        // `- SERVICE_FQDN_X_8080` with nothing referencing it is how these
+        // templates DECLARE a variable. Refusing on the declaration would
+        // make every untranslated template unplannable even when nothing
+        // consumes the value — including `config`, which is how you would
+        // inspect the file to find that out.
+        let document = """
+            services:
+              app:
+                image: openclaw
+                environment:
+                  - SERVICE_FQDN_OPENCLAW_8080
+            """
+        let result = try plan(document)
+        #expect(result.service(named: "app") != nil)
+    }
+}

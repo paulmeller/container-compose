@@ -57,6 +57,38 @@ public enum PlanError: Error, Equatable, Sendable {
     case extendsTargetMissing(service: String, target: String, file: String?)
     case extendsFileMissing(service: String, file: String)
     case requiredVariableUnset(variable: String, message: String)
+    case generatedVariablesUnresolved(names: [String])
+}
+
+extension Planner {
+    /// Refuses a document that REFERENCES a generated `SERVICE_*` variable
+    /// no value exists for.
+    ///
+    /// Interpolation would otherwise resolve those to empty strings, and a
+    /// service started with a blank username and password looks like a
+    /// broken app rather than an unconfigured one — the failure says
+    /// nothing about the step that was skipped. Coolify fills these in on
+    /// its side; here that is `container-compose translate`.
+    ///
+    /// Only REFERENCES count, never the bare declarations (`- SERVICE_FQDN_X_8080`)
+    /// these templates use to declare a variable in the first place. Were
+    /// declarations enough to trip it, an untranslated template could not
+    /// even be inspected with `config` — which is exactly how someone
+    /// would work out what it needs.
+    ///
+    /// A value from anywhere satisfies this: the check is whether one
+    /// exists, not where it came from.
+    static func requireGeneratedVariables(document: String, variables: [String: String]) throws {
+        let referenced = MagicVariable.scanReferences(document: document)
+        guard !referenced.isEmpty else { return }
+
+        let missing = referenced
+            .filter { (variables[$0] ?? "").isEmpty }
+            .sorted()
+        guard !missing.isEmpty else { return }
+
+        throw PlanError.generatedVariablesUnresolved(names: missing)
+    }
 }
 
 extension PlanError: CustomStringConvertible {
@@ -87,6 +119,15 @@ extension PlanError: CustomStringConvertible {
 
         case .extendsFileMissing(let service, let file):
             return "service '\(service)' extends a service in '\(file)', which could not be read"
+
+        case .generatedVariablesUnresolved(let names):
+            let listed = names.prefix(4).joined(separator: ", ")
+            let more = names.count > 4 ? " (and \(names.count - 4) more)" : ""
+            return """
+                this compose file uses generated variables that have no value yet: \(listed)\(more). \
+                Run `container-compose translate --file <this file>` to fill them in, \
+                then try again — starting now would give the service blank credentials.
+                """
 
         case .requiredVariableUnset(let variable, let message):
             // `${VAR:?message}` means "required"; the message is the author's
@@ -122,6 +163,8 @@ public struct Planner: Sendable {
         guard let rawServices = root["services"] as? [String: Any] else {
             throw PlanError.malformedDocument("no 'services' section")
         }
+
+        try Self.requireGeneratedVariables(document: document, variables: options.variables)
 
         var merged: [String: [String: Any]] = [:]
         var extendsCache: [String: [String: Any]] = [:]
