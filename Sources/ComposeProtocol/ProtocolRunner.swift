@@ -64,8 +64,8 @@ public struct ProtocolRunner: Sendable {
         case .up(let services):
             return await runUp(request, services: services, onMessage: onMessage)
 
-        case .down(let remove):
-            return await runDown(request, remove: remove, onMessage: onMessage)
+        case .down(let remove, let volumes):
+            return await runDown(request, remove: remove, volumes: volumes, onMessage: onMessage)
 
         case .build(let services):
             return await runPlanOperation(request, services: services, onMessage: onMessage) { engine, plan, onEvent in
@@ -221,11 +221,16 @@ public struct ProtocolRunner: Sendable {
         return success ? 0 : 1
     }
 
-    private func runDown(_ request: ProtocolRequest, remove: Bool, onMessage: @escaping @Sendable (ProtocolMessage) -> Void) async -> Int32 {
+    private func runDown(
+        _ request: ProtocolRequest,
+        remove: Bool,
+        volumes: Bool,
+        onMessage: @escaping @Sendable (ProtocolMessage) -> Void
+    ) async -> Int32 {
         guard let projectName = resolveProjectName(request, onMessage: onMessage) else { return 1 }
 
         let engine = Engine(adapter: adapter)
-        let events = await engine.down(projectName: projectName, remove: remove) { event in
+        let events = await engine.down(projectName: projectName, remove: remove, volumes: volumes) { event in
             onMessage(ProtocolMessage(event))
         }
 

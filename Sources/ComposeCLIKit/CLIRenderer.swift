@@ -89,6 +89,19 @@ public final class CLIRenderer: @unchecked Sendable {
             return column("network")
                 + "FAILED: \(message.network ?? "?") — \(message.reason ?? "unknown error")"
 
+        case .volumeReady:
+            let mode = message.reused == true ? "exists" : "created"
+            return column("volume") + "\(mode) -> \(message.volume ?? "?")"
+
+        case .volumeFailed:
+            return column("volume")
+                + "FAILED: \(message.volume ?? "?") — \(message.reason ?? "unknown error")"
+
+        case .resourceRemoved:
+            let kind = message.kind ?? "resource"
+            let name = message.network ?? message.volume ?? "?"
+            return column(kind) + "removed -> \(name)"
+
         case .done:
             let ready = message.ready ?? []
             let failed = message.failed ?? []

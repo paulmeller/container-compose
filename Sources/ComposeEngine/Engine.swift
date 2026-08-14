@@ -61,6 +61,24 @@ public actor Engine {
             }
         }
 
+        // Volumes, for the same reason and with more at stake: a container
+        // mounting a volume that does not exist gets an empty one invented for
+        // it, so a missing external volume would otherwise look like success
+        // right up until the data is gone.
+        for volume in plan.volumes {
+            do {
+                let created = try await adapter.ensureVolume(volume, projectName: plan.projectName)
+                emit(.volumeReady(volume: volume.resolvedName, created: created))
+            } catch {
+                emit(.volumeFailed(volume: volume.resolvedName, reason: "\(error)"))
+                for service in plan.services {
+                    emit(.serviceSkipped(service: service.name, reason: .volumeUnavailable))
+                }
+                emit(.done(success: false, ready: [], failed: [], skipped: plan.services.map(\.name)))
+                return events
+            }
+        }
+
         let observed = (try? await adapter.observe(projectName: plan.projectName)) ?? []
         let waves = Reconciler.plan(desired: plan, observed: observed)
 
@@ -120,8 +138,19 @@ public actor Engine {
     /// does not reconcile against a plan — `down` always means "everything
     /// currently running for this project should stop", regardless of what
     /// the compose file says today.
+    ///
+    /// `remove` also deletes the networks this project created, matching what
+    /// Compose does. `volumes` is deliberately a separate opt-in and not
+    /// implied by `remove`: a network is cheap to rebuild, a volume IS the
+    /// data, and no amount of convenience justifies deleting it because
+    /// someone typed the flag that removes containers.
     @discardableResult
-    public func down(projectName: String, remove: Bool, onEvent: (@Sendable (EngineEvent) -> Void)? = nil) async -> [EngineEvent] {
+    public func down(
+        projectName: String,
+        remove: Bool,
+        volumes: Bool = false,
+        onEvent: (@Sendable (EngineEvent) -> Void)? = nil
+    ) async -> [EngineEvent] {
         var events: [EngineEvent] = []
         func emit(_ event: EngineEvent) {
             events.append(event)
@@ -148,6 +177,21 @@ public actor Engine {
         for (name, serviceEvents, succeeded) in results.sorted(by: { $0.0 < $1.0 }) {
             events.append(contentsOf: serviceEvents)
             if succeeded { ready.append(name) } else { failed.append(name) }
+        }
+
+        // After the containers, never before: a network still holding one
+        // cannot be deleted, and a volume still attached to one certainly
+        // should not be. Skipped entirely if any teardown failed, since a
+        // surviving container still needs them.
+        if remove, failed.isEmpty {
+            for name in (try? await adapter.removeNetworks(projectName: projectName)) ?? [] {
+                emit(.resourceRemoved(kind: .network, name: name))
+            }
+        }
+        if volumes, failed.isEmpty {
+            for name in (try? await adapter.removeVolumes(projectName: projectName)) ?? [] {
+                emit(.resourceRemoved(kind: .volume, name: name))
+            }
         }
 
         emit(.done(success: failed.isEmpty, ready: ready, failed: failed, skipped: []))

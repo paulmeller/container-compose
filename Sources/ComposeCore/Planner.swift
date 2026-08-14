@@ -116,10 +116,24 @@ public struct Planner: Sendable {
             uniquingKeysWith: { first, _ in first }
         )
 
+        // Volumes are namespaced for the same reason, and it matters more: a
+        // service's mount holds the compose key while the volume exists under
+        // its resolved name, so `db-data` — a name almost every stack uses —
+        // resolved to one shared volume across unrelated projects. That does
+        // not merely leak data between them; the second project fails to
+        // start outright, with a virtualization error naming neither volumes
+        // nor the project it collided with.
+        let volumes = resolveVolumes(root, options: options)
+        let volumeNames = Dictionary(
+            volumes.map { ($0.name, $0.resolvedName) },
+            uniquingKeysWith: { first, _ in first }
+        )
+
         for name in selected.sorted() {
             planned.append(
                 try resolveService(
-                    name: name, raw: merged[name] ?? [:], options: options, networkNames: networkNames
+                    name: name, raw: merged[name] ?? [:], options: options,
+                    networkNames: networkNames, volumeNames: volumeNames
                 )
             )
         }
@@ -134,7 +148,7 @@ public struct Planner: Sendable {
             projectName: options.projectName,
             services: ordered,
             waves: waves,
-            volumes: resolveVolumes(root, options: options),
+            volumes: volumes,
             networks: networks
         )
     }
@@ -176,7 +190,8 @@ public struct Planner: Sendable {
         name: String,
         raw: [String: Any],
         options: PlanOptions,
-        networkNames: [String: String] = [:]
+        networkNames: [String: String] = [:],
+        volumeNames: [String: String] = [:]
     ) throws -> PlannedService {
         var variables = options.variables
 
@@ -232,7 +247,8 @@ public struct Planner: Sendable {
             entrypoint: try stringList(raw["entrypoint"], allowScalar: true).map(interpolate),
             environment: environment,
             ports: try stringList(raw["ports"]).map(interpolate),
-            volumes: try stringList(raw["volumes"]).map(interpolate),
+            volumes: try stringList(raw["volumes"]).map(interpolate)
+                .map { Self.namespaceVolumeMount($0, declared: volumeNames) },
             // A reference with no matching top-level entry passes through
             // unchanged rather than erroring: Compose allows it, and the
             // runtime's own "network not found" is a better message than a
@@ -356,6 +372,31 @@ public struct Planner: Sendable {
     }
 
     // MARK: - Project resources
+
+    /// Rewrites the source of a `source:target[:options]` mount to the
+    /// project-namespaced volume name, when — and only when — the source names
+    /// a volume the file declares.
+    ///
+    /// Everything else is deliberately left byte-for-byte alone:
+    ///
+    /// - **Bind mounts** (`./site:/html`, `/etc/localtime:/etc/localtime`) are
+    ///   host paths, not names. Rewriting one would point the mount somewhere
+    ///   that does not exist.
+    /// - **Undeclared names** pass through, because Compose permits them and
+    ///   namespacing one would invent a volume under a name the user never
+    ///   wrote and cannot predict.
+    /// - **A bare path with no source** (`/var/lib/data`, an anonymous volume)
+    ///   has nothing to namespace.
+    ///
+    /// Windows-style absolute sources (`C:\data:/x`) are not a case here: this
+    /// runtime is macOS-only, and treating a single leading letter as a drive
+    /// would break the legitimate one-character volume name `a:/data`.
+    static func namespaceVolumeMount(_ mount: String, declared: [String: String]) -> String {
+        let parts = mount.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
+        // Fewer than two parts is an anonymous volume; the source is the first.
+        guard parts.count >= 2, let resolved = declared[parts[0]] else { return mount }
+        return ([resolved] + parts.dropFirst()).joined(separator: ":")
+    }
 
     private func resolveVolumes(_ root: [String: Any], options: PlanOptions) -> [PlannedVolume] {
         guard let declared = root["volumes"] as? [String: Any] else { return [] }

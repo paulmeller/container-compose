@@ -10,7 +10,9 @@ import Foundation
 public struct ProtocolRequest: Sendable, Equatable {
     public enum Command: Sendable, Equatable {
         case up(services: [String])
-        case down(remove: Bool)
+        /// `volumes` is deliberately not implied by `remove`: containers and
+        /// networks are cheap to rebuild, a volume is the data itself.
+        case down(remove: Bool, volumes: Bool)
         case capabilities
         case build(services: [String])
         case pull(services: [String])
@@ -241,6 +243,7 @@ public struct ProtocolRequest: Sendable, Equatable {
         var signal = "KILL"
         var timeoutSeconds: Double?
         var outputPath: String?
+        var volumes = false
 
         func takeValue(_ flag: String) throws -> String {
             guard !rest.isEmpty else { throw ParseError.missingValue(forFlag: flag) }
@@ -260,6 +263,8 @@ public struct ProtocolRequest: Sendable, Equatable {
                 profiles.insert(try takeValue(token))
             case "--remove":
                 remove = true
+            case "--volumes", "-v":
+                volumes = true
             case "--force":
                 force = true
             case "--follow":
@@ -306,7 +311,7 @@ public struct ProtocolRequest: Sendable, Equatable {
             return base.with(.up(services: positionals))
         case "down":
             try requireFile()
-            return base.with(.down(remove: remove))
+            return base.with(.down(remove: remove, volumes: volumes))
         case "build":
             try requireFile()
             return base.with(.build(services: positionals))

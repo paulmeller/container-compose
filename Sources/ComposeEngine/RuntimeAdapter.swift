@@ -69,6 +69,32 @@ public protocol RuntimeAdapter: Sendable {
     /// consumer guess.
     func ensureNetwork(_ network: PlannedNetwork, projectName: String) async throws -> Bool
 
+    /// Every network this project created, removed. Ownership is by label, so
+    /// a network the user made themselves — or declared `external` — is never
+    /// touched. Returns what was removed, for reporting.
+    func removeNetworks(projectName: String) async throws -> [String]
+
+    // MARK: Volumes
+
+    /// Ensures `volume` exists before any container mounts it, and returns
+    /// whether this call created it.
+    ///
+    /// This must be explicit rather than left to the runtime's own
+    /// mount-time behaviour, for two reasons that both bite silently:
+    /// a volume conjured by a mount carries no labels, so teardown cannot tell
+    /// what this project owns; and a *missing* external volume gets created
+    /// empty instead of failing, which hands the user an empty disk where
+    /// their data was and calls it success.
+    func ensureVolume(_ volume: PlannedVolume, projectName: String) async throws -> Bool
+
+    /// Every volume this project created, removed — by label, so external and
+    /// user-made volumes are never touched. Returns what was removed.
+    ///
+    /// Separate from `removeNetworks` because the two carry different risk:
+    /// a network is cheap to rebuild, a volume is the data itself. Callers are
+    /// expected to gate this behind an explicit opt-in.
+    func removeVolumes(projectName: String) async throws -> [String]
+
     // MARK: Lifecycle
 
     /// Creates (but does not start) a container for `service`, running

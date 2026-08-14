@@ -39,12 +39,24 @@ struct WireImageEntry: Decodable {
     let reference: String
 }
 
-/// `container network list --format json`. Only the name is read: existence is
-/// the entire question `ensureNetwork` asks, and decoding the subnet/gateway
-/// status block would couple this to fields that carry no meaning here.
+/// `container network list --format json`. Name and labels only: existence is
+/// what `ensureNetwork` asks, ownership is what teardown asks, and decoding
+/// the subnet/gateway status block would couple this to fields carrying no
+/// meaning here.
 struct WireNetworkEntry: Decodable {
     struct Configuration: Decodable {
         let name: String
+        let labels: [String: String]?
+    }
+    let configuration: Configuration
+}
+
+/// `container volume list --format json`. Same shape and same reasoning as
+/// the network entry above.
+struct WireVolumeEntry: Decodable {
+    struct Configuration: Decodable {
+        let name: String
+        let labels: [String: String]?
     }
     let configuration: Configuration
 }

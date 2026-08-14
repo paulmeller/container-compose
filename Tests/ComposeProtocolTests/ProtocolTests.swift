@@ -52,10 +52,25 @@ struct ProtocolRequestParsingTests {
     @Test("down accepts --remove")
     func downRemoveFlag() throws {
         let withRemove = try ProtocolRequest.parse(["down", "--file", "c.yml", "--remove"])
-        #expect(withRemove.command == .down(remove: true))
+        #expect(withRemove.command == .down(remove: true, volumes: false))
 
         let without = try ProtocolRequest.parse(["down", "--file", "c.yml"])
-        #expect(without.command == .down(remove: false))
+        #expect(without.command == .down(remove: false, volumes: false))
+    }
+
+    @Test("down --volumes is a separate opt-in, never implied by --remove")
+    func downVolumesFlag() throws {
+        // The distinction is the point: --remove deletes containers and the
+        // networks this project made, both cheap to rebuild. A volume is the
+        // data itself, so deleting one has to be asked for.
+        let removeOnly = try ProtocolRequest.parse(["down", "--file", "c.yml", "--remove"])
+        #expect(removeOnly.command == .down(remove: true, volumes: false))
+
+        let both = try ProtocolRequest.parse(["down", "--file", "c.yml", "--remove", "--volumes"])
+        #expect(both.command == .down(remove: true, volumes: true))
+
+        let shorthand = try ProtocolRequest.parse(["down", "--file", "c.yml", "-v"])
+        #expect(shorthand.command == .down(remove: false, volumes: true))
     }
 
     @Test("An unknown command is rejected")
@@ -433,7 +448,7 @@ struct ProtocolRunnerTests {
         let adapter = FakeRuntimeAdapter()
         await adapter.seed(id: "proj-web", project: "proj", service: "web", running: true, configHash: "h")
 
-        let request = ProtocolRequest(command: .down(remove: true), projectName: "proj")
+        let request = ProtocolRequest(command: .down(remove: true, volumes: false), projectName: "proj")
         let (messages, exitCode) = await collectMessages(request, adapter: adapter)
 
         #expect(exitCode == 0)
@@ -445,7 +460,7 @@ struct ProtocolRunnerTests {
 
     @Test("down with neither a project name nor a compose file reports error")
     func downWithNothingToResolveProjectFrom() async throws {
-        let (messages, exitCode) = await collectMessages(ProtocolRequest(command: .down(remove: false)))
+        let (messages, exitCode) = await collectMessages(ProtocolRequest(command: .down(remove: false, volumes: false)))
         #expect(exitCode == 1)
         #expect(messages.first?.type == .error)
     }

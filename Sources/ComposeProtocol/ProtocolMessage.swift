@@ -50,6 +50,13 @@ public struct ProtocolMessage: Codable, Sendable, Equatable {
     // `reason` carries the failure text.
     public let network: String?
 
+    // Present on volume_ready and volume_failed, exactly as `network` above.
+    public let volume: String?
+
+    // Present on resource_removed: "network" or "volume", with the removed
+    // name in whichever of the two fields above matches.
+    public let kind: String?
+
     // Present on done.
     public let success: Bool?
     public let ready: [String]?
@@ -109,7 +116,9 @@ public struct ProtocolMessage: Codable, Sendable, Equatable {
         line: String? = nil,
         output: String? = nil,
         action: String? = nil,
-        network: String? = nil
+        network: String? = nil,
+        volume: String? = nil,
+        kind: String? = nil
     ) {
         self.version = Self.currentVersion
         self.type = type
@@ -134,6 +143,8 @@ public struct ProtocolMessage: Codable, Sendable, Equatable {
         self.output = output
         self.action = action
         self.network = network
+        self.volume = volume
+        self.kind = kind
     }
 
     public enum MessageType: String, Codable, Sendable {
@@ -156,6 +167,14 @@ public struct ProtocolMessage: Codable, Sendable, Equatable {
         /// A declared network could not be made available; nothing was
         /// created, and every service is skipped.
         case networkFailed = "network_failed"
+        /// A declared volume is available — `reused` says whether this run
+        /// created it or found it already there.
+        case volumeReady = "volume_ready"
+        /// A declared volume could not be made available.
+        case volumeFailed = "volume_failed"
+        /// A network or volume this project created was deleted during
+        /// teardown; `kind` says which.
+        case resourceRemoved = "resource_removed"
         case done
         case error
         /// One observed container — ps/ls/images/port.
@@ -206,6 +225,20 @@ extension ProtocolMessage {
 
         case .networkFailed(let network, let reason):
             self.init(type: .networkFailed, reason: reason, network: network)
+
+        case .volumeReady(let volume, let created):
+            self.init(type: .volumeReady, reused: !created, volume: volume)
+
+        case .volumeFailed(let volume, let reason):
+            self.init(type: .volumeFailed, reason: reason, volume: volume)
+
+        case .resourceRemoved(let kind, let name):
+            switch kind {
+            case .network:
+                self.init(type: .resourceRemoved, network: name, kind: kind.rawValue)
+            case .volume:
+                self.init(type: .resourceRemoved, volume: name, kind: kind.rawValue)
+            }
 
         case .done(let success, let ready, let failed, let skipped):
             self.init(type: .done, success: success, ready: ready, failed: failed, skipped: skipped)

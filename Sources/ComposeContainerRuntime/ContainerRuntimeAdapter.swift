@@ -126,14 +126,88 @@ public struct ContainerRuntimeAdapter: RuntimeAdapter {
     }
 
     private func networkExists(_ name: String) throws -> Bool {
+        try listNetworks().contains { $0.configuration.name == name }
+    }
+
+    private func listNetworks() throws -> [WireNetworkEntry] {
         let result = try ContainerCLI.run(["network", "list", "--format", "json"])
         guard let data = result.stdout.data(using: .utf8),
             !result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else {
-            return false
+            return []
         }
-        let entries = (try? JSONDecoder().decode([WireNetworkEntry].self, from: data)) ?? []
-        return entries.contains { $0.configuration.name == name }
+        return (try? JSONDecoder().decode([WireNetworkEntry].self, from: data)) ?? []
+    }
+
+    public func removeNetworks(projectName: String) async throws -> [String] {
+        let owned = try listNetworks()
+            .filter { $0.configuration.labels?["com.docker.compose.project"] == projectName }
+            .map(\.configuration.name)
+            .sorted()
+
+        var removed: [String] = []
+        for name in owned {
+            // A network still holding a container cannot be deleted, and that
+            // is not a failure worth aborting teardown over: the containers
+            // this project owns are already gone by now, so anything left is
+            // someone else's and deleting it would be wrong anyway.
+            if (try? ContainerCLI.run(["network", "delete", name])) != nil { removed.append(name) }
+        }
+        return removed
+    }
+
+    // MARK: - Volumes
+
+    public func ensureVolume(_ volume: PlannedVolume, projectName: String) async throws -> Bool {
+        if try volumeExists(volume.resolvedName) { return false }
+
+        // The runtime creates a volume implicitly on first mount, which makes
+        // this check look redundant — it is not. An implicitly created volume
+        // carries no labels, so teardown could never tell it apart from one
+        // the user made; and a missing EXTERNAL volume would be conjured empty
+        // rather than reported, handing back an empty disk where the data was
+        // supposed to be and calling the run a success.
+        guard !volume.external else {
+            throw AdapterError.message(
+                "volume '\(volume.resolvedName)' is declared external but does not exist — "
+                    + "create it first (`container volume create \(volume.resolvedName)`), "
+                    + "or drop `external: true` to have this project create it"
+            )
+        }
+
+        try ContainerCLI.run([
+            "volume", "create",
+            "--label", "com.docker.compose.project=\(projectName)",
+            volume.resolvedName,
+        ])
+        return true
+    }
+
+    private func volumeExists(_ name: String) throws -> Bool {
+        try listVolumes().contains { $0.configuration.name == name }
+    }
+
+    private func listVolumes() throws -> [WireVolumeEntry] {
+        let result = try ContainerCLI.run(["volume", "list", "--format", "json"])
+        guard let data = result.stdout.data(using: .utf8),
+            !result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            return []
+        }
+        return (try? JSONDecoder().decode([WireVolumeEntry].self, from: data)) ?? []
+    }
+
+    public func removeVolumes(projectName: String) async throws -> [String] {
+        let owned = try listVolumes()
+            .filter { $0.configuration.labels?["com.docker.compose.project"] == projectName }
+            .map(\.configuration.name)
+            .sorted()
+
+        var removed: [String] = []
+        for name in owned {
+            if (try? ContainerCLI.run(["volume", "delete", name])) != nil { removed.append(name) }
+        }
+        return removed
     }
 
     public func buildImage(for service: PlannedService, projectName: String) async throws -> String {

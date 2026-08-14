@@ -35,6 +35,7 @@ public actor FakeRuntimeAdapter: RuntimeAdapter {
         case healthcheckFailed(String)
         case notFound(String)
         case networkUnavailable(String)
+        case volumeUnavailable(String)
     }
 
     public private(set) var containers: [String: FakeContainer] = [:]
@@ -54,6 +55,14 @@ public actor FakeRuntimeAdapter: RuntimeAdapter {
     /// external network" apart from "made a new one".
     public private(set) var createdNetworks: [String] = []
     private var existingNetworks: Set<String> = []
+    /// Created by this project, and so removable by it — the in-memory stand-in
+    /// for the project label the real adapter writes.
+    private var ownedNetworks: Set<String> = []
+    /// Volumes, tracked exactly as networks are above.
+    public private(set) var ensuredVolumes: [String] = []
+    public private(set) var createdVolumes: [String] = []
+    private var existingVolumes: Set<String> = []
+    private var ownedVolumes: Set<String> = []
     private var nextID = 0
 
     public init() {}
@@ -87,17 +96,25 @@ public actor FakeRuntimeAdapter: RuntimeAdapter {
         existingNetworks.insert(resolvedName)
     }
 
+    /// Seeds a volume as already present, by resolved name — "this external
+    /// volume exists", or "an earlier run created it".
+    public func seedVolume(_ resolvedName: String) {
+        existingVolumes.insert(resolvedName)
+    }
+
     /// Calls to fail on, by matching image or service name — lets a test
     /// inject a specific failure without a real registry or runtime.
     private var imagesToFail: Set<String> = []
     private var servicesToFailCreate: Set<String> = []
     private var servicesToFailBuild: Set<String> = []
     private var networksToFail: Set<String> = []
+    private var volumesToFail: Set<String> = []
 
     public func failImage(_ image: String) { imagesToFail.insert(image) }
     public func failCreate(forService service: String) { servicesToFailCreate.insert(service) }
     public func failBuild(forService service: String) { servicesToFailBuild.insert(service) }
     public func failNetwork(_ resolvedName: String) { networksToFail.insert(resolvedName) }
+    public func failVolume(_ resolvedName: String) { volumesToFail.insert(resolvedName) }
 
     // MARK: Observation
 
@@ -151,7 +168,39 @@ public actor FakeRuntimeAdapter: RuntimeAdapter {
         if network.external { throw Failure.networkUnavailable(network.resolvedName) }
         existingNetworks.insert(network.resolvedName)
         createdNetworks.append(network.resolvedName)
+        ownedNetworks.insert(network.resolvedName)
         return true
+    }
+
+    public func removeNetworks(projectName: String) async throws -> [String] {
+        let removed = ownedNetworks.sorted()
+        existingNetworks.subtract(ownedNetworks)
+        ownedNetworks.removeAll()
+        return removed
+    }
+
+    // MARK: Volumes
+
+    public func ensureVolume(_ volume: PlannedVolume, projectName: String) async throws -> Bool {
+        ensuredVolumes.append(volume.resolvedName)
+        if volumesToFail.contains(volume.resolvedName) {
+            throw Failure.volumeUnavailable(volume.resolvedName)
+        }
+        if existingVolumes.contains(volume.resolvedName) { return false }
+        // Mirrors the network rule, and matters more: silently inventing a
+        // missing external volume hands back an empty disk where data was.
+        if volume.external { throw Failure.volumeUnavailable(volume.resolvedName) }
+        existingVolumes.insert(volume.resolvedName)
+        createdVolumes.append(volume.resolvedName)
+        ownedVolumes.insert(volume.resolvedName)
+        return true
+    }
+
+    public func removeVolumes(projectName: String) async throws -> [String] {
+        let removed = ownedVolumes.sorted()
+        existingVolumes.subtract(ownedVolumes)
+        ownedVolumes.removeAll()
+        return removed
     }
 
     // MARK: Lifecycle

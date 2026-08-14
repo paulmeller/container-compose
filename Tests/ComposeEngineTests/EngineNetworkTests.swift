@@ -156,6 +156,89 @@ struct EngineNetworkTests {
         #expect(networks.isEmpty)
     }
 
+    @Test("A missing external volume fails the run instead of quietly getting an empty one")
+    func missingExternalVolumeFails() async throws {
+        let result = try plan("""
+            volumes:
+              archive:
+                external: true
+            services:
+              web:
+                image: nginx
+                volumes:
+                  - archive:/data
+            """)
+        let adapter = FakeRuntimeAdapter()
+        let events = await Engine(adapter: adapter).up(result)
+
+        guard case .done(let success, _, _, let skipped) = events.last else {
+            Issue.record("expected a terminal .done event")
+            return
+        }
+        // The runtime invents an empty volume for an absent mount, so without
+        // this check the run "succeeds" while handing back a blank disk where
+        // the user's data was meant to be.
+        #expect(!success)
+        #expect(skipped == ["web"])
+
+        let containers = await adapter.containers
+        #expect(containers.isEmpty)
+
+        let reasons = events.compactMap { event -> SkipReason? in
+            guard case .serviceSkipped(_, let reason) = event else { return nil }
+            return reason
+        }
+        #expect(reasons == [.volumeUnavailable])
+    }
+
+    @Test("down --remove deletes the networks this project created, but never its volumes")
+    func downRemoveDeletesNetworksNotVolumes() async throws {
+        let result = try plan("""
+            networks:
+              backend: {}
+            volumes:
+              data: {}
+            services:
+              web:
+                image: nginx
+                networks: [backend]
+                volumes:
+                  - data:/data
+            """)
+        let adapter = FakeRuntimeAdapter()
+        _ = await Engine(adapter: adapter).up(result)
+
+        let events = await Engine(adapter: adapter).down(projectName: "proj", remove: true)
+        let removed = events.compactMap { event -> (ResourceKind, String)? in
+            guard case .resourceRemoved(let kind, let name) = event else { return nil }
+            return (kind, name)
+        }
+        #expect(removed.map(\.1) == ["proj_backend"])
+        #expect(removed.allSatisfy { $0.0 == .network })
+    }
+
+    @Test("down --volumes deletes the volumes this project created")
+    func downVolumesDeletesVolumes() async throws {
+        let result = try plan("""
+            volumes:
+              data: {}
+            services:
+              web:
+                image: nginx
+                volumes:
+                  - data:/data
+            """)
+        let adapter = FakeRuntimeAdapter()
+        _ = await Engine(adapter: adapter).up(result)
+
+        let events = await Engine(adapter: adapter).down(projectName: "proj", remove: true, volumes: true)
+        let removed = events.compactMap { event -> (ResourceKind, String)? in
+            guard case .resourceRemoved(let kind, let name) = event else { return nil }
+            return (kind, name)
+        }
+        #expect(removed.contains { $0.0 == .volume && $0.1 == "proj_data" })
+    }
+
     @Test("An already-present non-external network is reused, not recreated")
     func existingNetworkIsReused() async throws {
         let result = try plan("""

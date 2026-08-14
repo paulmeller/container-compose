@@ -34,6 +34,15 @@ public enum SkipReason: String, Codable, Sendable {
     /// the project ran, and retrying a single service cannot help until the
     /// network itself is fixed.
     case networkUnavailable
+
+    /// As `networkUnavailable`, for a declared volume.
+    case volumeUnavailable
+}
+
+/// What a `resourceRemoved` event removed.
+public enum ResourceKind: String, Codable, Sendable {
+    case network
+    case volume
 }
 
 /// What `imageReady` reports having happened to the image. Distinguishing
@@ -93,6 +102,18 @@ public enum EngineEvent: Sendable, Equatable {
     /// was refused), and no enum of causes would survive contact with a second
     /// runtime.
     case networkFailed(network: String, reason: String)
+
+    /// A declared volume is available. `created` carries the same
+    /// new-vs-already-there distinction `networkReady` does.
+    case volumeReady(volume: String, created: Bool)
+
+    /// A declared volume could not be made available.
+    case volumeFailed(volume: String, reason: String)
+
+    /// A network or volume this project created was deleted during teardown.
+    /// `kind` distinguishes them rather than two near-identical cases, since
+    /// consumers render both the same way — as a line saying what went.
+    case resourceRemoved(kind: ResourceKind, name: String)
 
     /// A service failed. `service.state` is not set to failed separately —
     /// this event is the terminal state.
