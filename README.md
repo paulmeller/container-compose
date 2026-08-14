@@ -1,5 +1,8 @@
 # container-compose
 
+[![ci](https://github.com/paulmeller/container-compose/actions/workflows/ci.yml/badge.svg)](https://github.com/paulmeller/container-compose/actions/workflows/ci.yml)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A Compose engine for Apple's `container` runtime, built API-first: the engine
 is the product, a CLI is one consumer of it. See [docs/DESIGN.md](docs/DESIGN.md)
 for the full thesis and architecture.
@@ -9,7 +12,15 @@ for the full thesis and architecture.
 **Homebrew** (macOS):
 
     brew tap paulmeller/container-compose
+    brew trust --tap paulmeller/container-compose
     brew install paulmeller/container-compose/container-compose
+
+The `trust` step is not optional and the fully-qualified name is not
+decoration. Homebrew silently ignores formulae from untrusted third-party
+taps, and `brew install container-compose` — the bare name — then falls back
+to an unrelated formula of the same name in homebrew-core. The result is a
+successful-looking install of software you did not ask for. Being public does
+not make a tap trusted; only *official* taps are trusted by default.
 
 **From source:**
 
