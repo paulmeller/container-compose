@@ -29,6 +29,13 @@ import Foundation
 /// contract: `run(_:onMessage:)` never produces a `.exec`/`.run` case (see
 /// `runPassthrough`, a separate entry point `main.swift` calls instead).
 public struct ProtocolRunner: Sendable {
+
+    /// This build's version. Bumped with the release it ships in, and
+    /// kept here rather than in Package.swift because it is the value the
+    /// `version` command prints — a consumer checking whether the binary
+    /// supports what it needs reads this, not the package manifest.
+    public static let version = "0.3.0"
+
     private let adapter: RuntimeAdapter
     private let capabilities: RuntimeCapabilities
     private let files: ComposeFileProvider
@@ -57,6 +64,10 @@ public struct ProtocolRunner: Sendable {
     /// instead, since they bypass this message stream entirely.
     public func run(_ request: ProtocolRequest, onMessage: @escaping @Sendable (ProtocolMessage) -> Void) async -> Int32 {
         switch request.command {
+        case .version:
+            onMessage(.resultMessage(ProtocolRunner.version))
+            return 0
+
         case .capabilities:
             onMessage(.capabilitiesMessage(capabilities))
             return 0

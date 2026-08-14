@@ -14,6 +14,15 @@ public struct ProtocolRequest: Sendable, Equatable {
         /// networks are cheap to rebuild, a volume is the data itself.
         case down(remove: Bool, volumes: Bool)
         case capabilities
+        /// Prints this build's version.
+        ///
+        /// Exists so a consumer can establish, once and cheaply, that the
+        /// binary on PATH is new enough for what it intends to call.
+        /// Without it the only way to find out was to invoke a subcommand
+        /// and read the failure — a stale build reports `unknown command`
+        /// with the same exit code as a usage error, so each feature had
+        /// to discover the problem separately.
+        case version
         /// Resolves a Coolify service template's generated `SERVICE_*`
         /// variables into a plain env file, leaving the compose document
         /// untouched. `force` regenerates values that already exist.
@@ -310,6 +319,8 @@ public struct ProtocolRequest: Sendable, Equatable {
         switch commandName {
         case "capabilities":
             return base.with(.capabilities)
+        case "version", "--version":
+            return base.with(.version)
         case "translate":
             try requireFile()
             return base.with(.translate(force: force))
