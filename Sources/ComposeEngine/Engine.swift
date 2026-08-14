@@ -18,6 +18,13 @@ public actor Engine {
     // adapter directly and bypass Engine's orchestration.
     let adapter: RuntimeAdapter
 
+    /// Volumes this run created and has not yet seeded. Seeding happens when
+    /// the first container that mounts one is created — matching Docker, and
+    /// necessarily so: only then is the image guaranteed present to copy from.
+    /// Actor-isolated, which is what makes it safe for a wave's concurrent
+    /// services to consult it without seeding the same volume twice.
+    private var volumesAwaitingSeed: Set<String> = []
+
     public init(adapter: RuntimeAdapter) {
         self.adapter = adapter
     }
@@ -68,6 +75,9 @@ public actor Engine {
         for volume in plan.volumes {
             do {
                 let created = try await adapter.ensureVolume(volume, projectName: plan.projectName)
+                // Only a volume this run created is a candidate: seeding an
+                // existing one would overwrite data.
+                if created { volumesAwaitingSeed.insert(volume.resolvedName) }
                 emit(.volumeReady(volume: volume.resolvedName, created: created))
             } catch {
                 emit(.volumeFailed(volume: volume.resolvedName, reason: "\(error)"))
@@ -81,6 +91,7 @@ public actor Engine {
 
         let observed = (try? await adapter.observe(projectName: plan.projectName)) ?? []
         let waves = Reconciler.plan(desired: plan, observed: observed)
+        let gatedOnHealth = Self.servicesGatedOnHealth(plan)
 
         var ready: [String] = []
         var failed: [String] = []
@@ -112,7 +123,12 @@ public actor Engine {
             let results = await withTaskGroup(of: (String, [EngineEvent], Bool).self) { group in
                 for action in wave {
                     group.addTask {
-                        await self.executeCollectingEvents(action, projectName: plan.projectName, onEvent: onEvent)
+                        await self.executeCollectingEvents(
+                            action,
+                            projectName: plan.projectName,
+                            gatedOnHealth: gatedOnHealth,
+                            onEvent: onEvent
+                        )
                     }
                 }
                 var collected: [(String, [EngineEvent], Bool)] = []
@@ -247,7 +263,10 @@ public actor Engine {
     public func pull(_ plan: Plan, onEvent: (@Sendable (EngineEvent) -> Void)? = nil) async -> [EngineEvent] {
         await runImageOperation(plan, state: .pulling, action: .pulled, onEvent: onEvent) { service in
             guard let image = service.image else { return nil }
-            try await self.adapter.ensureImage(image)
+            // `pull` is an explicit request to fetch, so the reported action
+            // stays `.pulled` whether or not anything was transferred — unlike
+            // `up`, where the distinction is the point.
+            _ = try await self.adapter.ensureImage(image)
             return image
         }
     }
@@ -328,6 +347,7 @@ public actor Engine {
     private func executeCollectingEvents(
         _ action: ReconcileAction,
         projectName: String,
+        gatedOnHealth: Set<String> = [],
         onEvent: (@Sendable (EngineEvent) -> Void)?
     ) async -> (String, [EngineEvent], Bool) {
         var events: [EngineEvent] = []
@@ -345,16 +365,21 @@ public actor Engine {
             case .start(let service, let containerID):
                 emit(.serviceState(service: name, state: .starting, detail: nil))
                 try await adapter.startContainer(id: containerID)
-                try await waitHealthyIfNeeded(service, containerID: containerID, emit: emit)
+                try await waitHealthyIfNeeded(
+                    service, containerID: containerID, gatedOnHealth: gatedOnHealth, emit: emit
+                )
                 emit(.serviceReady(service: name, containerID: containerID, reused: false))
 
             case .create(let service):
                 let image = try await resolveImage(service, projectName: projectName, emit: emit)
+                await seedNewVolumes(for: service, image: image, emit: emit)
                 emit(.serviceState(service: name, state: .creating, detail: nil))
                 let containerID = try await adapter.createContainer(for: service, image: image, projectName: projectName)
                 emit(.serviceState(service: name, state: .starting, detail: nil))
                 try await adapter.startContainer(id: containerID)
-                try await waitHealthyIfNeeded(service, containerID: containerID, emit: emit)
+                try await waitHealthyIfNeeded(
+                    service, containerID: containerID, gatedOnHealth: gatedOnHealth, emit: emit
+                )
                 emit(.serviceReady(service: name, containerID: containerID, reused: false))
 
             case .recreate(let service, let containerID, let reason):
@@ -362,11 +387,14 @@ public actor Engine {
                 try await adapter.stopContainer(id: containerID)
                 try await adapter.deleteContainer(id: containerID, force: true)
                 let image = try await resolveImage(service, projectName: projectName, emit: emit)
+                await seedNewVolumes(for: service, image: image, emit: emit)
                 emit(.serviceState(service: name, state: .creating, detail: nil))
                 let newID = try await adapter.createContainer(for: service, image: image, projectName: projectName)
                 emit(.serviceState(service: name, state: .starting, detail: nil))
                 try await adapter.startContainer(id: newID)
-                try await waitHealthyIfNeeded(service, containerID: newID, emit: emit)
+                try await waitHealthyIfNeeded(
+                    service, containerID: newID, gatedOnHealth: gatedOnHealth, emit: emit
+                )
                 emit(.serviceReady(service: name, containerID: newID, reused: false))
             }
             return (name, events, true)
@@ -426,14 +454,91 @@ public actor Engine {
         }
     }
 
+    /// Seeds any volume this run created that `service` is about to mount,
+    /// from `service`'s own image at the path it mounts it on.
+    ///
+    /// Claimed from the pending set before the copy runs, so two services in
+    /// the same wave mounting one volume cannot both seed it — the first to
+    /// arrive wins, which is also Docker's rule.
+    private func seedNewVolumes(
+        for service: PlannedService,
+        image: String,
+        emit: (EngineEvent) -> Void
+    ) async {
+        for mount in service.volumes {
+            guard let (volume, path) = Self.namedMount(mount),
+                volumesAwaitingSeed.remove(volume) != nil
+            else { continue }
+
+            do {
+                let seeded = try await adapter.seedVolume(volume, fromImage: image, atPath: path)
+                if seeded {
+                    emit(.volumeSeeded(volume: volume, fromImage: image, path: path))
+                } else {
+                    // Reported, not swallowed. A silent "could not seed" is
+                    // indistinguishable from "did not need to", and the
+                    // consequence surfaces much later as the container dying
+                    // with EACCES for no stated reason.
+                    emit(
+                        .volumeSeedFailed(
+                            volume: volume,
+                            reason: "could not copy \(path) from \(image) — the image may have no shell"
+                        )
+                    )
+                }
+            } catch {
+                // Not fatal: the container can still start, and it may well
+                // not care. Saying so beats a later EACCES with no explanation.
+                emit(.volumeSeedFailed(volume: volume, reason: "\(error)"))
+            }
+        }
+    }
+
+    /// Splits `source:target[:options]` into a named volume and its path,
+    /// or nil when the source is a host path (a bind mount, which the host
+    /// already owns) or there is no source at all.
+    static func namedMount(_ mount: String) -> (volume: String, path: String)? {
+        let parts = mount.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count >= 2 else { return nil }
+        let source = parts[0]
+        // A bind mount's source is a path; only a bare name is a volume.
+        guard !source.isEmpty, !source.hasPrefix("/"), !source.hasPrefix(".") else { return nil }
+        let target = parts[1]
+        guard target.hasPrefix("/") else { return nil }
+        return (source, target)
+    }
+
+    /// Blocks on a service's healthcheck only when another service is waiting
+    /// on it with `condition: service_healthy`.
+    ///
+    /// A healthcheck describes how to ask whether a service is ready; it does
+    /// not, on its own, make readiness a precondition of `up` succeeding.
+    /// Compose gates on it exactly where a dependent says to. Treating every
+    /// healthcheck as a gate means a service that is running perfectly well —
+    /// but still migrating, or simply slower than its own declared retry
+    /// budget — is reported as FAILED. That happened with n8n: the app was
+    /// serving, and `up` said it had failed.
     private func waitHealthyIfNeeded(
         _ service: PlannedService,
         containerID: String,
+        gatedOnHealth: Set<String>,
         emit: (EngineEvent) -> Void
     ) async throws {
+        guard gatedOnHealth.contains(service.name) else { return }
         guard let healthcheck = service.healthcheck, !healthcheck.disabled else { return }
         emit(.serviceState(service: service.name, state: .waitingForHealthy, detail: nil))
         try await adapter.waitForHealthy(containerID: containerID, healthcheck: healthcheck)
+    }
+
+    /// Services some other service waits on with `service_healthy`.
+    static func servicesGatedOnHealth(_ plan: Plan) -> Set<String> {
+        var gated: Set<String> = []
+        for service in plan.services {
+            for dependency in service.dependsOn where dependency.condition == .healthy {
+                gated.insert(dependency.service)
+            }
+        }
+        return gated
     }
 
     /// Resolves the image a service should run: pulled when `image:` is set,
@@ -445,8 +550,14 @@ public actor Engine {
     /// explicit `image:` alongside `build:` names what to tag it as).
     private func resolveImage(_ service: PlannedService, projectName: String, emit: (EngineEvent) -> Void) async throws -> String {
         if let image = service.image {
-            emit(.serviceState(service: service.name, state: .pulling, detail: image))
-            try await adapter.ensureImage(image)
+            // Announced as `checkingImage` rather than `pulling`, because at
+            // this point it is not known whether anything will be fetched.
+            // Claiming "pulling" for what is usually a no-op is how a bug that
+            // re-pulled every image on every run went unnoticed: the output
+            // said it was pulling, so the time it took looked like the network.
+            emit(.serviceState(service: service.name, state: .checkingImage, detail: image))
+            let pulled = try await adapter.ensureImage(image)
+            emit(.imageReady(service: service.name, image: image, action: pulled ? .pulled : .present))
             return image
         }
         emit(.serviceState(service: service.name, state: .building, detail: service.build?.context))

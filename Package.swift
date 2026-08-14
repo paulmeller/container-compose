@@ -65,6 +65,21 @@ let package = Package(
             dependencies: ["ComposeContainerRuntime", "ComposeEngine", "ComposeCore"]
         ),
 
+        // Pure decoding and matching tests for that same adapter — no daemon,
+        // so unlike the suite above these run in CI.
+        //
+        // This target exists because of a bug nothing else could have caught:
+        // the image list's reference lives at `configuration.name`, not at the
+        // top level, so decoding produced nothing, a `try?` swallowed the
+        // failure, and every run re-pulled every image it already had. The
+        // fast suites never touched this target, and the live suite passed
+        // because re-pulling still yields a working image — the only symptom
+        // was slowness, which reads as a slow network.
+        .testTarget(
+            name: "ComposeContainerRuntimeTests",
+            dependencies: ["ComposeContainerRuntime", "ComposeCore"]
+        ),
+
         // An in-memory RuntimeAdapter, public and its own target (not inside a
         // test target) specifically so more than one test target can import
         // it — a type defined inside one test target is not importable from

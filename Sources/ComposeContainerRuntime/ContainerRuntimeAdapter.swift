@@ -74,9 +74,10 @@ public struct ContainerRuntimeAdapter: RuntimeAdapter {
 
     // MARK: - Images
 
-    public func ensureImage(_ image: String) async throws {
-        if try imageExists(image) { return }
+    public func ensureImage(_ image: String) async throws -> Bool {
+        if try imageExists(image) { return false }
         try ContainerCLI.run(["image", "pull", image])
+        return true
     }
 
     private func imageExists(_ image: String) throws -> Bool {
@@ -84,16 +85,31 @@ public struct ContainerRuntimeAdapter: RuntimeAdapter {
         guard let data = result.stdout.data(using: .utf8), !result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return false
         }
-        let entries = (try? JSONDecoder().decode([WireImageEntry].self, from: data)) ?? []
-        // Matches on exact reference, a registry-qualified form of it
-        // (`docker.io/library/nginx:latest` for `nginx:latest`), or the final
-        // path component, since the runtime is not consistent about which
-        // form it stores.
-        return entries.contains { entry in
-            entry.reference == image
-                || entry.reference.hasSuffix("/\(image)")
-                || entry.reference.components(separatedBy: "/").last == image
+        // Deliberately NOT `try?` with an empty fallback. Swallowing a decode
+        // failure here turns "I cannot read the runtime's output" into "no
+        // images exist", so every image is re-pulled on every run and the only
+        // symptom is slowness — which reads as a slow network, not a bug. If
+        // the shape ever changes again, it should say so.
+        let entries: [WireImageEntry]
+        do {
+            entries = try JSONDecoder().decode([WireImageEntry].self, from: data)
+        } catch {
+            throw AdapterError.message(
+                "could not read `container image list --format json` — the runtime's output format "
+                    + "may have changed: \(error)"
+            )
         }
+        return entries.contains { Self.imageReference(entries: $0.reference, matches: image) }
+    }
+
+    /// Matches on exact reference, a registry-qualified form of it
+    /// (`docker.io/library/nginx:latest` for `nginx:latest`), or the final
+    /// path component, since the runtime is not consistent about which form it
+    /// stores. Static and internal so it can be tested without a daemon.
+    static func imageReference(entries reference: String, matches image: String) -> Bool {
+        reference == image
+            || reference.hasSuffix("/\(image)")
+            || reference.components(separatedBy: "/").last == image
     }
 
     // MARK: - Networks
@@ -195,6 +211,48 @@ public struct ContainerRuntimeAdapter: RuntimeAdapter {
             return []
         }
         return (try? JSONDecoder().decode([WireVolumeEntry].self, from: data)) ?? []
+    }
+
+    /// Scratch mount point for seeding. Deliberately obscure: it exists only
+    /// for the lifetime of the one-off copy container, and must not collide
+    /// with anything the image itself ships at a plausible path.
+    private static let seedMountPoint = "/__compose_seed"
+
+    public func seedVolume(_ volume: String, fromImage image: String, atPath path: String) async throws -> Bool {
+        // `cp -a` preserves ownership and mode of everything it copies, and
+        // the explicit chown afterwards covers the case that actually bites:
+        // a path the image creates but leaves EMPTY (n8n's /home/node/.n8n),
+        // where there are no entries to carry ownership across, so only the
+        // directory itself says who may write there.
+        let script = """
+            set -e
+            [ -d '\(path)' ] || exit 0
+            cp -a '\(path)/.' '\(Self.seedMountPoint)/' 2>/dev/null || true
+            owner=$(stat -c '%u:%g' '\(path)' 2>/dev/null) || exit 0
+            chown "$owner" '\(Self.seedMountPoint)'
+            """
+
+        // The entrypoint is overridden because an application image's own
+        // entrypoint would run the app instead of the copy — n8n's swallows
+        // the command entirely and reports `sh` as not found.
+        let result = try? ContainerCLI.run([
+            "run", "--rm",
+            // As root, because the chown is the entire point and the image's
+            // own user is precisely the unprivileged one that cannot perform
+            // it — n8n runs as `node`, and the seed failed with "Operation not
+            // permitted" until this was added. Only this throwaway copy
+            // container is elevated; the real service still runs as itself.
+            "--user", "0",
+            "--entrypoint", "sh",
+            "--volume", "\(volume):\(Self.seedMountPoint)",
+            image,
+            "-c", script,
+        ])
+
+        // No shell in the image (distroless and friends). Not fatal: nothing
+        // was seeded, the volume is still empty, and many images do not care.
+        guard let result, result.succeeded else { return false }
+        return true
     }
 
     public func removeVolumes(projectName: String) async throws -> [String] {

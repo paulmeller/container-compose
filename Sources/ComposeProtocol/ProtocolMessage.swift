@@ -172,6 +172,11 @@ public struct ProtocolMessage: Codable, Sendable, Equatable {
         case volumeReady = "volume_ready"
         /// A declared volume could not be made available.
         case volumeFailed = "volume_failed"
+        /// A newly created volume was populated from its image; `image` and
+        /// `detail` carry what was copied and from where.
+        case volumeSeeded = "volume_seeded"
+        /// A newly created volume could not be seeded. Informational.
+        case volumeSeedFailed = "volume_seed_failed"
         /// A network or volume this project created was deleted during
         /// teardown; `kind` says which.
         case resourceRemoved = "resource_removed"
@@ -231,6 +236,12 @@ extension ProtocolMessage {
 
         case .volumeFailed(let volume, let reason):
             self.init(type: .volumeFailed, reason: reason, volume: volume)
+
+        case .volumeSeeded(let volume, let image, let path):
+            self.init(type: .volumeSeeded, detail: path, image: image, volume: volume)
+
+        case .volumeSeedFailed(let volume, let reason):
+            self.init(type: .volumeSeedFailed, reason: reason, volume: volume)
 
         case .resourceRemoved(let kind, let name):
             switch kind {

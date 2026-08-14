@@ -38,10 +38,14 @@ public protocol RuntimeAdapter: Sendable {
 
     // MARK: Images
 
-    /// Ensures `image` is present locally, pulling it if not. A no-op when
-    /// already present — the adapter decides what "present" means for its
-    /// runtime.
-    func ensureImage(_ image: String) async throws
+    /// Ensures `image` is present locally, pulling it if not, and returns
+    /// whether it actually pulled. A no-op when already present — the adapter
+    /// decides what "present" means for its runtime.
+    ///
+    /// The return value is not decoration: reporting a no-op as a pull is what
+    /// let a bug that re-fetched every image on every run pass for a slow
+    /// network.
+    func ensureImage(_ image: String) async throws -> Bool
 
     /// Builds `service`'s image from its `build` configuration and returns
     /// the reference it was tagged with. The adapter decides the tag, the
@@ -86,6 +90,22 @@ public protocol RuntimeAdapter: Sendable {
     /// empty instead of failing, which hands the user an empty disk where
     /// their data was and calls it success.
     func ensureVolume(_ volume: PlannedVolume, projectName: String) async throws -> Bool
+
+    /// Copies whatever `image` has at `path` into `volume`, ownership
+    /// included, the way Docker seeds a freshly created named volume.
+    ///
+    /// This runtime does not do it: a new volume mounts as an empty
+    /// root-owned directory, so an image running as a non-root user — which
+    /// most self-hosted apps do — cannot write to its own data directory and
+    /// dies with EACCES on first start. Seeding is what makes
+    /// `volumes: [data:/home/node/.n8n]` behave as the compose file's author
+    /// intended.
+    ///
+    /// Only ever called for a volume this run just created, so it cannot
+    /// overwrite data. Returns false when the image has no shell to copy
+    /// with, which is not an error — the caller reports it and carries on,
+    /// since plenty of images work fine without seeding.
+    func seedVolume(_ volume: String, fromImage image: String, atPath path: String) async throws -> Bool
 
     /// Every volume this project created, removed — by label, so external and
     /// user-made volumes are never touched. Returns what was removed.

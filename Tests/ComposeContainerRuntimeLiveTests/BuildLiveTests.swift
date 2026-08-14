@@ -45,11 +45,24 @@ struct BuildLiveTests {
     /// every test below needs to prove what the Dockerfile actually baked in.
     private func buildAndReadMarker(_ service: PlannedService, projectName: String, adapter: ContainerRuntimeAdapter) async throws -> String {
         let tag = try await adapter.buildImage(for: service, projectName: projectName)
+
+        // These tests drive the adapter directly to exercise `build` on its
+        // own, so the networks a plan implies are theirs to create — Engine is
+        // what normally does that. Every service now joins `<project>_default`
+        // when it names none of its own, so `create` would otherwise fail
+        // against a network nobody made.
+        for network in service.networks {
+            _ = try? ContainerCLI.run(["network", "create", network])
+        }
+
         let containerID = try await adapter.createContainer(for: service, image: tag, projectName: projectName)
         defer {
             _ = try? ContainerCLI.run(["stop", containerID])
             _ = try? ContainerCLI.run(["delete", "--force", containerID])
             _ = try? ContainerCLI.run(["image", "delete", tag])
+            for network in service.networks {
+                _ = try? ContainerCLI.run(["network", "delete", network])
+            }
         }
         try await adapter.startContainer(id: containerID)
         let result = try ContainerCLI.run(["exec", containerID, "cat", "/marker"])

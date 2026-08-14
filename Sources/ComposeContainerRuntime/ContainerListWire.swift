@@ -35,8 +35,22 @@ struct WireStatus: Decodable {
     let state: String
 }
 
+/// `container image list --format json`.
+///
+/// The reference lives at `configuration.name`, NOT at the top level. Decoding
+/// it from a top-level `reference` silently produced nothing — the decode
+/// failed, the failure was swallowed by a `?? []`, and every existence check
+/// answered "absent", so every `up` re-pulled every image it already had. The
+/// only symptom was slowness, which reads as the network being slow rather
+/// than as a bug.
 struct WireImageEntry: Decodable {
-    let reference: String
+    struct Configuration: Decodable {
+        /// Registry-qualified, e.g. `docker.io/n8nio/n8n:2.10.2`.
+        let name: String
+    }
+    let configuration: Configuration
+
+    var reference: String { configuration.name }
 }
 
 /// `container network list --format json`. Name and labels only: existence is

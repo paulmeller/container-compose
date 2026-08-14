@@ -137,8 +137,8 @@ struct EngineNetworkTests {
         #expect(Set(web.networks) == ["proj_backend", "shared-net"])
     }
 
-    @Test("A project declaring no networks ensures none, and still comes up")
-    func noDeclaredNetworksIsUntouched() async throws {
+    @Test("A project declaring no networks still gets one, and its services join it")
+    func undeclaredNetworksFallBackToProjectDefault() async throws {
         let result = try plan("""
             services:
               web: { image: nginx }
@@ -152,8 +152,32 @@ struct EngineNetworkTests {
         }
         #expect(success)
 
+        // Not cosmetic parity with Compose: on this runtime a container left
+        // on the built-in `default` network cannot have its ports published —
+        // the host binds the port and even accepts a connection, but nothing
+        // is proxied, so the app looks hung rather than unreachable.
         let networks = await adapter.ensuredNetworks
-        #expect(networks.isEmpty)
+        #expect(networks == ["proj_default"])
+
+        let web = try #require(result.service(named: "web"))
+        #expect(web.networks == ["proj_default"])
+    }
+
+    @Test("A service naming its own network does not also join the default")
+    func declaredNetworksSuppressTheDefault() throws {
+        let result = try plan("""
+            networks:
+              backend: {}
+            services:
+              web:
+                image: nginx
+                networks: [backend]
+            """)
+
+        let web = try #require(result.service(named: "web"))
+        #expect(web.networks == ["proj_backend"])
+        // No stray empty network for a file that wired everything itself.
+        #expect(result.networks.map(\.resolvedName) == ["proj_backend"])
     }
 
     @Test("A missing external volume fails the run instead of quietly getting an empty one")

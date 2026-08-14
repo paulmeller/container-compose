@@ -46,6 +46,10 @@ public actor FakeRuntimeAdapter: RuntimeAdapter {
     /// assert a copy happened without a real filesystem.
     public private(set) var copies: [(source: String, destination: String)] = []
     public private(set) var pushedImages: [String] = []
+    /// Every `ensureImage` call, in order — separate from `presentImages` so a
+    /// test can tell "was asked about" from "had to fetch".
+    public private(set) var pulledImages: [String] = []
+    private var presentImages: Set<String> = []
     public private(set) var exports: [(containerID: String, outputPath: String)] = []
     /// Every network Engine asked for, in call order — the assertion that
     /// networks are ensured at all, and before any container exists.
@@ -63,6 +67,11 @@ public actor FakeRuntimeAdapter: RuntimeAdapter {
     public private(set) var createdVolumes: [String] = []
     private var existingVolumes: Set<String> = []
     private var ownedVolumes: Set<String> = []
+    /// Every seed attempt, in call order — the assertion that a newly created
+    /// volume is seeded from the right image at the right path, and that an
+    /// existing one is left alone.
+    public private(set) var seededVolumes: [(volume: String, image: String, path: String)] = []
+    private var volumesWithoutShell: Set<String> = []
     private var nextID = 0
 
     public init() {}
@@ -109,12 +118,16 @@ public actor FakeRuntimeAdapter: RuntimeAdapter {
     private var servicesToFailBuild: Set<String> = []
     private var networksToFail: Set<String> = []
     private var volumesToFail: Set<String> = []
+    private var servicesToFailHealth: Set<String> = []
 
     public func failImage(_ image: String) { imagesToFail.insert(image) }
     public func failCreate(forService service: String) { servicesToFailCreate.insert(service) }
     public func failBuild(forService service: String) { servicesToFailBuild.insert(service) }
     public func failNetwork(_ resolvedName: String) { networksToFail.insert(resolvedName) }
     public func failVolume(_ resolvedName: String) { volumesToFail.insert(resolvedName) }
+    /// Marks an image as having no shell, so seeding reports that it could not
+    /// copy rather than throwing — distroless images really are like this.
+    public func imageHasNoShell(_ image: String) { volumesWithoutShell.insert(image) }
 
     // MARK: Observation
 
@@ -142,9 +155,16 @@ public actor FakeRuntimeAdapter: RuntimeAdapter {
 
     // MARK: Images
 
-    public func ensureImage(_ image: String) async throws {
+    public func ensureImage(_ image: String) async throws -> Bool {
         if imagesToFail.contains(image) { throw Failure.imagePullFailed(image) }
+        pulledImages.append(image)
+        // Present after the first ask, so a second `up` in one test reports
+        // the same "already there" a real runtime would.
+        return presentImages.insert(image).inserted
     }
+
+    /// Seeds an image as already local, so `ensureImage` reports no pull.
+    public func seedImage(_ image: String) { presentImages.insert(image) }
 
     public func buildImage(for service: PlannedService, projectName: String) async throws -> String {
         if servicesToFailBuild.contains(service.name) { throw Failure.imageBuildFailed(service.name) }
@@ -196,6 +216,11 @@ public actor FakeRuntimeAdapter: RuntimeAdapter {
         return true
     }
 
+    public func seedVolume(_ volume: String, fromImage image: String, atPath path: String) async throws -> Bool {
+        seededVolumes.append((volume: volume, image: image, path: path))
+        return !volumesWithoutShell.contains(image)
+    }
+
     public func removeVolumes(projectName: String) async throws -> [String] {
         let removed = ownedVolumes.sorted()
         existingVolumes.subtract(ownedVolumes)
@@ -234,8 +259,17 @@ public actor FakeRuntimeAdapter: RuntimeAdapter {
 
     public func waitForHealthy(containerID: String, healthcheck: PlannedHealthcheck?) async throws {
         // Instant in the fake — healthcheck TIMING is a real-adapter concern,
-        // not something Engine's orchestration logic needs to wait on.
+        // not something Engine's orchestration logic needs to wait on. What
+        // Engine DOES own is whether it waits at all, so a test needs to be
+        // able to make the check fail.
+        if let service = containers[containerID]?.service, servicesToFailHealth.contains(service) {
+            throw Failure.healthcheckFailed(service)
+        }
     }
+
+    /// Makes this service's healthcheck fail, so a test can tell "waited and
+    /// the check failed" from "never waited".
+    public func failHealthcheck(forService service: String) { servicesToFailHealth.insert(service) }
 
     // MARK: Introspection
 

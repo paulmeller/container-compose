@@ -9,6 +9,9 @@ import Foundation
 /// A stage a service is passing through, emitted as it happens rather than
 /// batched at the end. This is what a consumer renders as progress.
 public enum ServiceState: String, Codable, Sendable {
+    /// Deciding whether the image needs fetching at all. Distinct from
+    /// `pulling`, which now means a fetch is genuinely happening.
+    case checkingImage
     case pulling
     case building
     case pushing
@@ -53,6 +56,9 @@ public enum ResourceKind: String, Codable, Sendable {
 public enum ImageAction: String, Codable, Sendable {
     case built
     case pulled
+    /// Already local; nothing was fetched. Distinguished from `pulled` so a
+    /// consumer can tell a slow first run from a repeat one.
+    case present
     case pushed
 }
 
@@ -109,6 +115,17 @@ public enum EngineEvent: Sendable, Equatable {
 
     /// A declared volume could not be made available.
     case volumeFailed(volume: String, reason: String)
+
+    /// A newly created volume was populated from its image, the way Docker
+    /// seeds one. Reported rather than silent because it explains why a
+    /// volume is not empty on first run, and because its absence is the
+    /// difference between an app starting and failing with EACCES.
+    case volumeSeeded(volume: String, fromImage: String, path: String)
+
+    /// A newly created volume could not be seeded — usually an image with no
+    /// shell to copy with. Not a failure: the container still starts, and may
+    /// well not care.
+    case volumeSeedFailed(volume: String, reason: String)
 
     /// A network or volume this project created was deleted during teardown.
     /// `kind` distinguishes them rather than two near-identical cases, since

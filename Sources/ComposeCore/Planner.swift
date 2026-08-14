@@ -170,14 +170,22 @@ public struct Planner: Sendable {
             uniquingKeysWith: { first, _ in first }
         )
 
+        let fallbackNetwork = Self.defaultNetwork(projectName: options.projectName)
+
         for name in selected.sorted() {
             planned.append(
                 try resolveService(
                     name: name, raw: merged[name] ?? [:], options: options,
-                    networkNames: networkNames, volumeNames: volumeNames
+                    networkNames: networkNames, volumeNames: volumeNames,
+                    fallbackNetwork: fallbackNetwork.resolvedName
                 )
             )
         }
+
+        // Included only if something actually joined it, so a file that wires
+        // every service to its own networks does not get a stray empty one.
+        let usesFallback = planned.contains { $0.networks.contains(fallbackNetwork.resolvedName) }
+        let allNetworks = usesFallback ? networks + [fallbackNetwork] : networks
 
         // 5. Order, and group into concurrently-startable waves.
         let waves = try Self.dependencyWaves(planned)
@@ -190,7 +198,7 @@ public struct Planner: Sendable {
             services: ordered,
             waves: waves,
             volumes: volumes,
-            networks: networks
+            networks: allNetworks
         )
     }
 
@@ -232,7 +240,8 @@ public struct Planner: Sendable {
         raw: [String: Any],
         options: PlanOptions,
         networkNames: [String: String] = [:],
-        volumeNames: [String: String] = [:]
+        volumeNames: [String: String] = [:],
+        fallbackNetwork: String? = nil
     ) throws -> PlannedService {
         var variables = options.variables
 
@@ -294,7 +303,13 @@ public struct Planner: Sendable {
             // unchanged rather than erroring: Compose allows it, and the
             // runtime's own "network not found" is a better message than a
             // planning-time guess about which of the two the user meant.
-            networks: try stringList(raw["networks"]).map(interpolate).map { networkNames[$0] ?? $0 },
+            networks: try {
+                let declared = try stringList(raw["networks"]).map(interpolate).map { networkNames[$0] ?? $0 }
+                // A service naming no network joins the project's default one,
+                // rather than the runtime's built-in `default` where published
+                // ports do not work.
+                return declared.isEmpty ? [fallbackNetwork].compactMap { $0 } : declared
+            }(),
             labels: labels,
             dependsOn: Self.dependsOn(raw),
             healthcheck: Self.healthcheck(raw["healthcheck"]),
@@ -451,6 +466,25 @@ public struct Planner: Sendable {
                 external: external
             )
         }
+    }
+
+    /// The network every service joins when it names none of its own —
+    /// `<project>_default`, exactly as Compose does it.
+    ///
+    /// Not merely a convention worth matching: on this runtime a container on
+    /// the built-in `default` network cannot have its ports published. The
+    /// host binds the port and a client's TCP connection is even accepted, but
+    /// nothing is proxied through, so the app appears hung rather than
+    /// unreachable. On a network the project creates, publishing works. Since
+    /// most compose files never mention networks at all, leaving them on the
+    /// built-in one would make published ports silently useless for the common
+    /// case.
+    static func defaultNetwork(projectName: String) -> PlannedNetwork {
+        PlannedNetwork(
+            name: "default",
+            resolvedName: "\(projectName)_default".lowercased(),
+            external: false
+        )
     }
 
     private func resolveNetworks(_ root: [String: Any], options: PlanOptions) -> [PlannedNetwork] {

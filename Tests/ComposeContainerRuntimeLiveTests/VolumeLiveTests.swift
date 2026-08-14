@@ -101,8 +101,13 @@ struct VolumeLiveTests {
         }
 
         let projectName = "ccbind\(UUID().uuidString.prefix(6).lowercased())"
-        cleanUp(projectNames: [projectName], volumeNames: [])
-        defer { cleanUp(projectNames: [projectName], volumeNames: []) }
+        // The document below declares `data:` at the top level even though the
+        // service only bind-mounts, so the project still creates
+        // `<project>_data` — leaving it out of the cleanup list leaks one
+        // volume per run, which is exactly what happened.
+        let volumes = ["\(projectName)_data"]
+        cleanUp(projectNames: [projectName], volumeNames: volumes)
+        defer { cleanUp(projectNames: [projectName], volumeNames: volumes) }
 
         // A real directory with a real file, so a namespaced (and therefore
         // empty) volume would be visibly different from a working bind mount.

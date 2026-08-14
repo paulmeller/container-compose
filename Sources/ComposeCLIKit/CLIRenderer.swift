@@ -97,6 +97,14 @@ public final class CLIRenderer: @unchecked Sendable {
             return column("volume")
                 + "FAILED: \(message.volume ?? "?") — \(message.reason ?? "unknown error")"
 
+        case .volumeSeeded:
+            return column("volume")
+                + "seeded -> \(message.volume ?? "?") from \(message.image ?? "?"):\(message.detail ?? "?")"
+
+        case .volumeSeedFailed:
+            return column("volume")
+                + "not seeded -> \(message.volume ?? "?") (\(message.reason ?? "unknown reason"))"
+
         case .resourceRemoved:
             let kind = message.kind ?? "resource"
             let name = message.network ?? message.volume ?? "?"
