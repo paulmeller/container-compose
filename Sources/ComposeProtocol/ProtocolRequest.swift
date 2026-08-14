@@ -26,7 +26,12 @@ public struct ProtocolRequest: Sendable, Equatable {
         /// Resolves a Coolify service template's generated `SERVICE_*`
         /// variables into a plain env file, leaving the compose document
         /// untouched. `force` regenerates values that already exist.
-        case translate(force: Bool)
+        /// `toStdout` prints the resolved values instead of writing a
+        /// .env, so a caller can hold them itself and supply them per
+        /// invocation (see `--env-stdin`). Combined with `--env-stdin`
+        /// this is idempotent: values already supplied are echoed back
+        /// unchanged and only the gaps are generated.
+        case translate(force: Bool, toStdout: Bool)
         case build(services: [String])
         case pull(services: [String])
         case push(services: [String])
@@ -274,6 +279,7 @@ public struct ProtocolRequest: Sendable, Equatable {
         var positionals: [String] = []
         var remove = false
         var force = false
+        var toStdout = false
         var follow = false
         var all = false
         var tail: Int?
@@ -299,6 +305,8 @@ public struct ProtocolRequest: Sendable, Equatable {
                 envFilePath = try takeValue(token)
             case "--env-stdin":
                 envFromStdin = true
+            case "--stdout":
+                toStdout = true
             case "--profile":
                 profiles.insert(try takeValue(token))
             case "--remove":
@@ -351,7 +359,7 @@ public struct ProtocolRequest: Sendable, Equatable {
             return base.with(.version)
         case "translate":
             try requireFile()
-            return base.with(.translate(force: force))
+            return base.with(.translate(force: force, toStdout: toStdout))
         case "up":
             try requireFile()
             return base.with(.up(services: positionals))

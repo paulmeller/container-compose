@@ -135,8 +135,8 @@ public struct ProtocolRunner: Sendable {
         case .config:
             return runConfig(request, onMessage: onMessage)
 
-        case .translate(let force):
-            return runTranslate(request, force: force, onMessage: onMessage)
+        case .translate(let force, let toStdout):
+            return runTranslate(request, force: force, toStdout: toStdout, onMessage: onMessage)
 
         case .logs(let services, let follow, let tail):
             return await runLogs(request, services: services, follow: follow, tail: tail, onMessage: onMessage)
@@ -352,6 +352,7 @@ public struct ProtocolRunner: Sendable {
     private func runTranslate(
         _ request: ProtocolRequest,
         force: Bool,
+        toStdout: Bool,
         onMessage: @escaping @Sendable (ProtocolMessage) -> Void
     ) -> Int32 {
         guard let composePath = request.composeFilePath else {
@@ -366,7 +367,10 @@ public struct ProtocolRunner: Sendable {
         let directory = (composePath as NSString).deletingLastPathComponent
         let envPath = request.envFilePath ?? (directory.isEmpty ? ".env" : directory + "/.env")
 
-        let existing = files.contents(atPath: envPath).map(Planner.parseEnvFile) ?? [:]
+        var existing = files.contents(atPath: envPath).map(Planner.parseEnvFile) ?? [:]
+        // What the caller already holds counts as existing, so a value it
+        // supplies is never regenerated behind its back.
+        existing.merge(request.envOverrides) { _, supplied in supplied }
         let variables: [MagicVariable]
         do {
             variables = try MagicVariable.scan(document: document)
@@ -419,6 +423,20 @@ public struct ProtocolRunner: Sendable {
             } else if let bare = group.first(where: { $0.declaredName == base }) {
                 value(for: bare)
             }
+        }
+
+        if toStdout {
+            // Printed, not written: a caller holding these itself supplies
+            // them per invocation (`--env-stdin`) and keeps nothing on
+            // disk beside the compose file. Combined with `--env-stdin`
+            // this is idempotent — values already supplied come back
+            // unchanged and only the gaps are generated, which matters
+            // because a regenerated password would change every service's
+            // config hash and recreate containers that were fine.
+            for name in resolved.keys.sorted() {
+                onMessage(.resultMessage("\(name)=\(resolved[name] ?? "")"))
+            }
+            return 0
         }
 
         guard Self.write(envFile: resolved, to: envPath) else {

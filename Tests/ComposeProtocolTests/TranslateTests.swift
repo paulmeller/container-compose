@@ -48,7 +48,7 @@ struct TranslateTests {
         force: Bool = false
     ) async -> (messages: [ProtocolMessage], exitCode: Int32) {
         let runner = ProtocolRunner(adapter: FakeRuntimeAdapter())
-        let request = ProtocolRequest(command: .translate(force: force), composeFilePath: composePath)
+        let request = ProtocolRequest(command: .translate(force: force, toStdout: false), composeFilePath: composePath)
         let collector = TranslateMessageCollector()
         let exitCode = await runner.run(request) { collector.append($0) }
         return (collector.messages, exitCode)
@@ -305,5 +305,114 @@ struct TranslateTests {
             // deterministic, and better than leaving a reference empty.
             #expect(values["SERVICE_URL_APP"] == "http://localhost:3000")
         }
+    }
+}
+
+@Suite("translate --stdout", .serialized)
+struct TranslateToStdoutTests {
+
+    private func withTempDirectory(_ body: (String) async throws -> Void) async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cc-translate-out-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try await body(directory.path)
+    }
+
+    private static let template = """
+        services:
+          app:
+            image: openclaw
+            environment:
+              - AUTH_USER=${SERVICE_USER_APP}
+              - AUTH_PASSWORD=${SERVICE_PASSWORD_APP}
+        """
+
+    private func run(
+        composePath: String,
+        overrides: [String: String] = [:]
+    ) async -> [String] {
+        let runner = ProtocolRunner(adapter: FakeRuntimeAdapter())
+        let request = ProtocolRequest(
+            command: .translate(force: false, toStdout: true),
+            composeFilePath: composePath,
+            envOverrides: overrides
+        )
+        let collector = StdoutCollector()
+        _ = await runner.run(request) { collector.append($0) }
+        return collector.lines
+    }
+
+    @Test("--stdout prints the values and writes nothing")
+    func printsWithoutWriting() async throws {
+        try await withTempDirectory { directory in
+            let composePath = directory + "/compose.yml"
+            try Self.template.write(toFile: composePath, atomically: true, encoding: .utf8)
+
+            let lines = await run(composePath: composePath)
+
+            #expect(lines.contains { $0.hasPrefix("SERVICE_USER_APP=") })
+            #expect(lines.contains { $0.hasPrefix("SERVICE_PASSWORD_APP=") })
+            // The whole point: a caller holding these itself keeps nothing
+            // beside the compose file.
+            #expect(!FileManager.default.fileExists(atPath: directory + "/.env"))
+        }
+    }
+
+    @Test("A supplied value comes back unchanged rather than being regenerated")
+    func suppliedValuesSurvive() async throws {
+        try await withTempDirectory { directory in
+            let composePath = directory + "/compose.yml"
+            try Self.template.write(toFile: composePath, atomically: true, encoding: .utf8)
+
+            let lines = await run(
+                composePath: composePath,
+                overrides: ["SERVICE_PASSWORD_APP": "already-mine"]
+            )
+
+            // Regenerating would change the service's config hash and
+            // recreate a container that was fine — and, for a database,
+            // hand it a password its data was not initialised with.
+            #expect(lines.contains("SERVICE_PASSWORD_APP=already-mine"))
+            // The gap is still filled.
+            #expect(lines.contains { $0.hasPrefix("SERVICE_USER_APP=") && $0 != "SERVICE_USER_APP=" })
+        }
+    }
+
+    @Test("Called twice with its own output, it is stable")
+    func idempotentAcrossCalls() async throws {
+        try await withTempDirectory { directory in
+            let composePath = directory + "/compose.yml"
+            try Self.template.write(toFile: composePath, atomically: true, encoding: .utf8)
+
+            let first = await run(composePath: composePath)
+            var carried: [String: String] = [:]
+            for line in first {
+                guard let separator = line.firstIndex(of: "=") else { continue }
+                carried[String(line[line.startIndex..<separator])] = String(line[line.index(after: separator)...])
+            }
+
+            let second = await run(composePath: composePath, overrides: carried)
+            #expect(Set(first) == Set(second), "feeding its own output back must change nothing")
+        }
+    }
+}
+
+/// Collects `result` message text — the undecorated `KEY=VALUE` lines.
+private final class StdoutCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [String] = []
+
+    func append(_ message: ProtocolMessage) {
+        guard message.type == .result, let text = message.output else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        stored.append(text)
+    }
+
+    var lines: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return stored
     }
 }
