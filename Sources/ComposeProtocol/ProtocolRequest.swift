@@ -14,6 +14,10 @@ public struct ProtocolRequest: Sendable, Equatable {
         /// networks are cheap to rebuild, a volume is the data itself.
         case down(remove: Bool, volumes: Bool)
         case capabilities
+        /// Resolves a Coolify service template's generated `SERVICE_*`
+        /// variables into a plain env file, leaving the compose document
+        /// untouched. `force` regenerates values that already exist.
+        case translate(force: Bool)
         case build(services: [String])
         case pull(services: [String])
         case push(services: [String])
@@ -306,6 +310,9 @@ public struct ProtocolRequest: Sendable, Equatable {
         switch commandName {
         case "capabilities":
             return base.with(.capabilities)
+        case "translate":
+            try requireFile()
+            return base.with(.translate(force: force))
         case "up":
             try requireFile()
             return base.with(.up(services: positionals))

@@ -105,14 +105,14 @@ Sources/
                                proof by construction that `--format text`
                                has no capability `--format ndjson` lacks.
 Tests/
-  ComposeCoreTests/            76 tests, ~15ms. No daemon — includes a
+  ComposeCoreTests/            92 tests, ~15ms. No daemon — includes a
                                real-filesystem suite (temp dirs, no
                                InMemoryProvider) specifically so path
                                resolution can't hide behind that fake's
                                deliberately lenient basename fallback.
-  ComposeEngineTests/          32 tests against the in-memory fake, ~1s
+  ComposeEngineTests/          41 tests against the in-memory fake, ~1s
                                (dominated by one deliberate `wait` timeout).
-  ComposeProtocolTests/        68 tests, request parsing + wire mapping + full
+  ComposeProtocolTests/        79 tests, request parsing + wire mapping + full
                                runs against the fake — no process spawn —
                                plus DirectoryWatcher's own suite, against
                                real temp directories and real kqueue events.
@@ -285,6 +285,44 @@ The rules, and why each one is what it is:
 Reused rather than recreated, like everything else here: an existing network
 is reported as found, and `networkReady` carries `created` so a consumer can
 say which happened rather than guess.
+
+## Generated variables, without giving up a pure core
+
+Coolify's app templates declare variables whose values that platform invents —
+`SERVICE_PASSWORD_POSTGRES`, `SERVICE_URL_AFFINE_3010`. Supporting them means
+producing values, which needs randomness and somewhere to keep them, and both
+are exactly what `Core` is not allowed to touch.
+
+The split that preserves it:
+
+- **`MagicVariable` (Core, pure)** understands the naming convention and finds
+  the variables in a document. It generates nothing on its own — value
+  generation takes a `RandomNumberGenerator` as a parameter, so it is
+  deterministic under test and reads the system source only when a caller
+  passes one.
+- **`translate` (the runner, where I/O already lives)** generates the missing
+  values and persists them to a plain `.env`. Planning then receives them the
+  way it receives any other variable — through `PlanOptions.variables` — so the
+  planner cannot tell the difference and stays a pure function of its inputs.
+
+Persistence is load-bearing rather than a convenience. A regenerated password
+changes the resolved service definition, so its `configHash` changes, so
+reconciliation recreates a container that did not need recreating — the exact
+behaviour this engine exists to avoid — and any database already initialised
+with the old credentials rejects the new ones. Values are therefore written
+once and never rewritten without `--force`.
+
+The compose document is deliberately not rewritten. Round-tripping it through
+the YAML parser would discard every comment, and in these templates the
+comments carry the catalogue metadata. Since a bare `- SERVICE_X` entry
+inherits from the environment, as the Compose spec says it should, writing the
+values beside the file is enough to make the original run unmodified.
+
+What is NOT generated matters as much: a great many template variables merely
+begin with `SERVICE_` and hold credentials only the user has
+(`SERVICE_OPENAI_API_KEY`). Inventing a value for one would replace "unset,
+fails loudly" with "set to nonsense, fails obscurely", so the recognised kinds
+are a closed set and everything else is left to fail honestly.
 
 ## Runtime facts worth writing down
 

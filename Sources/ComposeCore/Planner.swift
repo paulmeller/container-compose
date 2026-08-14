@@ -59,6 +59,47 @@ public enum PlanError: Error, Equatable, Sendable {
     case requiredVariableUnset(variable: String, message: String)
 }
 
+extension PlanError: CustomStringConvertible {
+    /// Without this every one of these reaches the user as a raw enum dump —
+    /// `requiredVariableUnset(variable: "AWS_SECRET", message: "")` — which
+    /// names the problem but reads like a crash and says nothing about what to
+    /// do next.
+    public var description: String {
+        switch self {
+        case .malformedDocument(let detail):
+            return "the compose file could not be read: \(detail)"
+
+        case .noSuchService(let name):
+            return "no service named '\(name)' in this compose file"
+
+        case .serviceMissingImageAndBuild(let name):
+            return "service '\(name)' declares neither 'image:' nor 'build:', so there is nothing to run"
+
+        case .dependencyCycle(let names):
+            return "services depend on each other in a cycle: \(names.joined(separator: " -> "))"
+
+        case .extendsCycle(let names):
+            return "'extends:' forms a cycle: \(names.joined(separator: " -> "))"
+
+        case .extendsTargetMissing(let service, let target, let file):
+            let location = file.map { "in '\($0)'" } ?? "in this file"
+            return "service '\(service)' extends '\(target)', which does not exist \(location)"
+
+        case .extendsFileMissing(let service, let file):
+            return "service '\(service)' extends a service in '\(file)', which could not be read"
+
+        case .requiredVariableUnset(let variable, let message):
+            // `${VAR:?message}` means "required"; the message is the author's
+            // own explanation, so it is worth more than anything generic.
+            let explanation = message.isEmpty ? "" : " — \(message)"
+            return """
+                required variable '\(variable)' is not set\(explanation). \
+                Set it in the environment, or in a .env file beside the compose file.
+                """
+        }
+    }
+}
+
 /// Turns a compose document into a `Plan`.
 ///
 /// The whole layer is a pure function of (document, options, file provider):
@@ -227,7 +268,7 @@ public struct Planner: Sendable {
         // Service-declared environment resolves against the file-derived set,
         // then wins over it.
         var environment = fileEnvironment
-        for (key, value) in Self.mapping(raw["environment"]) {
+        for (key, value) in Self.mapping(raw["environment"], inheriting: options.variables) {
             environment[try interpolate(key)] = try interpolate(value)
         }
 
@@ -460,7 +501,13 @@ public struct Planner: Sendable {
         path.hasPrefix("/") ? path : URL(fileURLWithPath: directory).appendingPathComponent(path).standardizedFileURL.path
     }
 
-    static func mapping(_ value: Any?) -> [String: String] {
+    /// `inheriting` supplies values for bare list entries — `- FOO` with no
+    /// `=`. Per the Compose spec that form means "pass FOO through from the
+    /// surrounding environment", so it resolves against these; a key found
+    /// nowhere stays empty rather than disappearing, since a service asking
+    /// "is this set" must get the same answer either way. Callers that have no
+    /// such environment (labels) pass nothing and keep the old behaviour.
+    static func mapping(_ value: Any?, inheriting: [String: String] = [:]) -> [String: String] {
         if let map = value as? [String: Any] {
             return map.reduce(into: [:]) { $0[$1.key] = "\($1.value)" }
         }
@@ -469,7 +516,7 @@ public struct Planner: Sendable {
             return list.reduce(into: [:]) { result, entry in
                 let text = "\(entry)"
                 guard let separator = text.firstIndex(of: "=") else {
-                    result[text] = ""
+                    result[text] = inheriting[text] ?? ""
                     return
                 }
                 result[String(text[text.startIndex..<separator])] = String(text[text.index(after: separator)...])

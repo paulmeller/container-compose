@@ -234,6 +234,33 @@ struct EnvironmentTests {
         #expect(api.environment["EMPTY"] == "")
     }
 
+    @Test("A bare key with no '=' inherits its value, rather than becoming empty")
+    func bareKeyInheritsFromVariables() throws {
+        // Compose spec: `- FOO` with no value takes FOO from the environment
+        // the file is resolved against. Defaulting it to "" instead silently
+        // blanks a variable the user expected to be passed through — and it is
+        // the form nearly every Coolify template uses to declare its generated
+        // values, so those all arrived empty.
+        let result = try Planner(files: InMemoryProvider([:])).plan(
+            document: """
+                services:
+                  api:
+                    image: alpine
+                    environment:
+                      - INHERITED
+                      - ABSENT
+                """,
+            options: PlanOptions(projectName: "p", variables: ["INHERITED": "from-the-environment"])
+        )
+
+        let api = try #require(result.service(named: "api"))
+        #expect(api.environment["INHERITED"] == "from-the-environment")
+        // Not present anywhere: still declared, still empty. Dropping the key
+        // entirely would be a different behaviour, and a service that checks
+        // "is this set" would see the opposite answer.
+        #expect(api.environment["ABSENT"] == "")
+    }
+
     @Test("Quotes around env-file values are delimiters, not content")
     func envFileQuoteStripping() throws {
         let parsed = Planner.parseEnvFile("""

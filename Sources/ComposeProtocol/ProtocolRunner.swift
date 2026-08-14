@@ -124,6 +124,9 @@ public struct ProtocolRunner: Sendable {
         case .config:
             return runConfig(request, onMessage: onMessage)
 
+        case .translate(let force):
+            return runTranslate(request, force: force, onMessage: onMessage)
+
         case .logs(let services, let follow, let tail):
             return await runLogs(request, services: services, follow: follow, tail: tail, onMessage: onMessage)
 
@@ -319,6 +322,145 @@ public struct ProtocolRunner: Sendable {
         }
         onMessage(.configMessage(text))
         return 0
+    }
+
+    /// Resolves a Coolify template's generated variables into a plain env file.
+    ///
+    /// The compose document is deliberately NOT rewritten. Round-tripping it
+    /// through the YAML parser would discard every comment — and in these
+    /// templates the comments carry the catalogue metadata (`# category:`,
+    /// `# documentation:`), which is most of what makes one readable. Since a
+    /// bare `- SERVICE_X` entry now inherits from the environment, writing the
+    /// values into `.env` beside the file is enough to make the original
+    /// template run unmodified.
+    ///
+    /// Existing values are never overwritten without `--force`, and that is
+    /// the whole point rather than a nicety: regenerating a password changes
+    /// the service's configHash — so every container is recreated — and any
+    /// database already initialised with the old password rejects the new one.
+    private func runTranslate(
+        _ request: ProtocolRequest,
+        force: Bool,
+        onMessage: @escaping @Sendable (ProtocolMessage) -> Void
+    ) -> Int32 {
+        guard let composePath = request.composeFilePath else {
+            onMessage(.errorMessage("translate needs a compose file: pass --file"))
+            return 1
+        }
+        guard let document = files.contents(atPath: composePath) else {
+            onMessage(.errorMessage("could not read '\(composePath)'"))
+            return 1
+        }
+
+        let directory = (composePath as NSString).deletingLastPathComponent
+        let envPath = request.envFilePath ?? (directory.isEmpty ? ".env" : directory + "/.env")
+
+        let existing = files.contents(atPath: envPath).map(Planner.parseEnvFile) ?? [:]
+        let variables: [MagicVariable]
+        do {
+            variables = try MagicVariable.scan(document: document)
+        } catch {
+            onMessage(.errorMessage("could not scan '\(composePath)': \(error)"))
+            return 1
+        }
+
+        guard !variables.isEmpty else {
+            onMessage(.resultMessage("no generated SERVICE_* variables found in \(composePath)"))
+            return 0
+        }
+
+        var generator = SystemRandomNumberGenerator()
+        var resolved = existing
+        var generated: [String] = []
+        var kept: [String] = []
+
+        // Every spelling the document uses gets a value, including each port
+        // of a name exposed on more than one.
+        for variable in variables {
+            let name = variable.declaredName
+            if !force, let current = existing[name], !current.isEmpty {
+                kept.append(name)
+            } else {
+                resolved[name] = variable.generatedValue(using: &generator)
+                generated.append(name)
+            }
+        }
+
+        // The bare spelling, for templates that declare `SERVICE_URL_X_3010`
+        // and then reference `$SERVICE_URL_X`. Where a name is exposed on
+        // several ports the lowest is used — arbitrary, but deterministic, and
+        // the alternative is leaving the reference empty. A credential has no
+        // port, so its bare name is already its declared name and this is a
+        // no-op for it.
+        for (base, group) in Dictionary(grouping: variables, by: \.baseName) {
+            guard resolved[base] == nil || force else { continue }
+            let lowest = group.min { ($0.port ?? 0) < ($1.port ?? 0) }
+            guard let canonical = lowest, canonical.declaredName != base else { continue }
+            resolved[base] = resolved[canonical.declaredName]
+        }
+
+        guard Self.write(envFile: resolved, to: envPath) else {
+            onMessage(.errorMessage("could not write '\(envPath)'"))
+            return 1
+        }
+
+        for name in generated.sorted() {
+            onMessage(.resultMessage("generated \(name)"))
+        }
+        for name in kept.sorted() {
+            onMessage(.resultMessage("kept \(name) (already set — pass --force to regenerate)"))
+        }
+
+        let ignoreNote = Self.ensureGitIgnored(envPath: envPath, directory: directory)
+        onMessage(.resultMessage("wrote \(resolved.count) variables to \(envPath)"))
+        if let ignoreNote { onMessage(.resultMessage(ignoreNote)) }
+        onMessage(
+            .resultMessage(
+                "\(envPath) holds real credentials — it must not be committed"
+            )
+        )
+        return 0
+    }
+
+    /// Writes `KEY=value` lines, sorted so the file has a stable diff between
+    /// runs rather than reordering itself every time.
+    private static func write(envFile values: [String: String], to path: String) -> Bool {
+        let body = values.keys.sorted()
+            .map { "\($0)=\(values[$0] ?? "")" }
+            .joined(separator: "\n")
+        let contents = """
+            # Generated by `container-compose translate`.
+            # Values are stable across runs on purpose: regenerating them would
+            # change each service's config hash (recreating every container) and
+            # would be rejected by any database already initialised with the old
+            # credentials. Edit a value only if you mean to rotate it.
+            \(body)
+
+            """
+        return (try? contents.write(toFile: path, atomically: true, encoding: .utf8)) != nil
+    }
+
+    /// Adds the env file to `.gitignore` when the directory is inside a git
+    /// repository. Returns a note when something changed, so the caller can
+    /// say so rather than editing a tracked file silently.
+    private static func ensureGitIgnored(envPath: String, directory: String) -> String? {
+        let root = directory.isEmpty ? "." : directory
+        guard FileManager.default.fileExists(atPath: root + "/.git") else { return nil }
+
+        let ignorePath = root + "/.gitignore"
+        let entry = (envPath as NSString).lastPathComponent
+        let current = (try? String(contentsOfFile: ignorePath, encoding: .utf8)) ?? ""
+        let alreadyListed = current
+            .split(separator: "\n")
+            .contains { $0.trimmingCharacters(in: .whitespaces) == entry }
+        guard !alreadyListed else { return nil }
+
+        let separator = current.isEmpty || current.hasSuffix("\n") ? "" : "\n"
+        let updated = current + separator + entry + "\n"
+        guard (try? updated.write(toFile: ignorePath, atomically: true, encoding: .utf8)) != nil else {
+            return "could not add '\(entry)' to \(ignorePath) — add it yourself before committing"
+        }
+        return "added '\(entry)' to \(ignorePath)"
     }
 
     private func runLogs(

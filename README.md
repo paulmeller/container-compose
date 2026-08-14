@@ -59,11 +59,37 @@ instead of formatted text. It's the same binary either way — a human terminal
 and a non-Swift process both just call `container-compose` with a different
 flag.
 
+## Running a Coolify template
+
+Self-hosted app templates written for [Coolify](https://coolify.io) use
+`SERVICE_*` variables whose values that platform generates — passwords, usernames,
+URLs — so the file alone will not run anywhere else. `translate` fills them in:
+
+    container-compose translate --file affine.yaml
+    container-compose up --file affine.yaml --project affine
+
+It writes a `.env` beside the compose file and leaves the template itself
+untouched, so nothing is lost to a reformatting pass. Values are stable across
+runs: regenerating a password would change every service's config hash — and so
+recreate every container — besides being rejected by any database already
+initialised with the old one. Pass `--force` to rotate them deliberately.
+
+Variables that only *look* generated (`SERVICE_OPENAI_API_KEY`,
+`SERVICE_DISCORD_TOKEN`) are left alone, because they hold credentials only you
+have; inventing a random value would turn "unset, fails loudly" into "set to
+nonsense, fails obscurely". A template needing one says so by name when you run it.
+
+`SERVICE_URL_*` and `SERVICE_FQDN_*` resolve to `localhost` and the port the
+template asked for. Coolify routes those through a reverse proxy to a real
+domain; there is no proxy here, and adding one is a
+[non-goal](docs/DESIGN.md#non-goals).
+
 ## Commands
 
 `up`, `down`, `build`, `pull`, `push`, `start`, `stop`, `restart`, `kill`,
 `rm`, `wait`, `ps`, `ls`, `images`, `port`, `config`, `logs`, `top`, `stats`,
-`cp`, `export`, `watch`, `exec`, `run`, `capabilities` — 25 subcommands total.
+`cp`, `export`, `watch`, `exec`, `run`, `capabilities`, `translate` — 26
+subcommands total.
 Start with `container-compose capabilities`, which reports what your installed
 runtime actually supports; see [docs/DESIGN.md](docs/DESIGN.md) for how
 commands are routed internally.
