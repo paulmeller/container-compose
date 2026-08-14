@@ -13,6 +13,7 @@
 //  instead.
 //
 
+import ComposeCore
 import ComposeProtocol
 import ComposeContainerRuntime
 import ComposeCLIKit
@@ -45,12 +46,30 @@ func reportRequestError(_ text: String) {
     }
 }
 
-let request: ProtocolRequest
+var request: ProtocolRequest
 do {
     request = try ProtocolRequest.parse(arguments)
 } catch {
     reportRequestError("\(error)")
     exit(1)
+}
+
+// `--env-stdin`: read `KEY=VALUE` lines from stdin as this invocation's
+// variables. Read HERE rather than inside the runner so the runner stays
+// a pure function of its request — the same reason argv is parsed into a
+// request before anything runs.
+//
+// Deliberately not argv (`--env KEY=SECRET` is visible to anyone running
+// `ps`) and not a file (a value that outlives the call and has to be
+// cleaned up). A caller holding a user's API keys can pipe them in and
+// keep them nowhere else.
+if request.envFromStdin {
+    let data = FileHandle.standardInput.readDataToEndOfFile()
+    guard let text = String(data: data, encoding: .utf8) else {
+        reportRequestError("--env-stdin: input was not valid UTF-8")
+        exit(1)
+    }
+    request.envOverrides = Planner.parseEnvFile(text)
 }
 
 let runner = ProtocolRunner(adapter: ContainerRuntimeAdapter())

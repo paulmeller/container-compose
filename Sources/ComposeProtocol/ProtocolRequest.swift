@@ -60,6 +60,19 @@ public struct ProtocolRequest: Sendable, Equatable {
     /// containing directory — the same convention Compose itself uses.
     public var projectName: String?
     public var envFilePath: String?
+    /// True when `--env-stdin` was given: the executable reads stdin and
+    /// fills `envOverrides` before running the request.
+    public var envFromStdin: Bool
+
+    /// Variables supplied for THIS invocation only, ahead of everything
+    /// else.
+    ///
+    /// Read from stdin (`--env-stdin`) rather than argv or a file: argv is
+    /// visible to anyone running `ps`, and a file is a value that outlives
+    /// the call and has to be cleaned up. A GUI holding a user's API keys
+    /// needs neither — it can pipe them in per invocation and keep them
+    /// nowhere else.
+    public var envOverrides: [String: String]
     public var profiles: Set<String>
 
     public init(
@@ -67,12 +80,16 @@ public struct ProtocolRequest: Sendable, Equatable {
         composeFilePath: String? = nil,
         projectName: String? = nil,
         envFilePath: String? = nil,
+        envFromStdin: Bool = false,
+        envOverrides: [String: String] = [:],
         profiles: Set<String> = []
     ) {
         self.command = command
         self.composeFilePath = composeFilePath
         self.projectName = projectName
         self.envFilePath = envFilePath
+        self.envFromStdin = envFromStdin
+        self.envOverrides = envOverrides
         self.profiles = profiles
     }
 
@@ -179,6 +196,7 @@ public struct ProtocolRequest: Sendable, Equatable {
         var composeFilePath: String?
         var projectName: String?
         var envFilePath: String?
+        var envFromStdin = false
         var profiles: Set<String> = []
         var remove = false
         var noTTY = false
@@ -198,6 +216,11 @@ public struct ProtocolRequest: Sendable, Equatable {
                 projectName = try takeValue(token)
             case "--env-file":
                 envFilePath = try takeValue(token)
+            case "--env-stdin":
+                // Parsed here so the flag is rejected consistently with
+                // every other one; the executable reads stdin and fills
+                // `envOverrides` before running the request.
+                envFromStdin = true
             case "--profile":
                 profiles.insert(try takeValue(token))
             case "--remove":
@@ -226,6 +249,7 @@ public struct ProtocolRequest: Sendable, Equatable {
             composeFilePath: composeFilePath,
             projectName: projectName,
             envFilePath: envFilePath,
+            envFromStdin: envFromStdin,
             profiles: profiles
         )
 
@@ -257,6 +281,7 @@ public struct ProtocolRequest: Sendable, Equatable {
         var timeoutSeconds: Double?
         var outputPath: String?
         var volumes = false
+        var envFromStdin = false
 
         func takeValue(_ flag: String) throws -> String {
             guard !rest.isEmpty else { throw ParseError.missingValue(forFlag: flag) }
@@ -272,6 +297,8 @@ public struct ProtocolRequest: Sendable, Equatable {
                 projectName = try takeValue(token)
             case "--env-file":
                 envFilePath = try takeValue(token)
+            case "--env-stdin":
+                envFromStdin = true
             case "--profile":
                 profiles.insert(try takeValue(token))
             case "--remove":
@@ -313,6 +340,7 @@ public struct ProtocolRequest: Sendable, Equatable {
             composeFilePath: composeFilePath,
             projectName: projectName,
             envFilePath: envFilePath,
+            envFromStdin: envFromStdin,
             profiles: profiles
         )
 

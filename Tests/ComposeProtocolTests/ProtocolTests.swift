@@ -768,3 +768,87 @@ private final class MessageCollector: @unchecked Sendable {
         return _messages
     }
 }
+
+@Suite("Variables supplied per invocation")
+struct EnvOverrideTests {
+
+    @Test("--env-stdin is accepted, and is off by default")
+    func flagParses() throws {
+        let with = try ProtocolRequest.parse(["up", "--file", "c.yml", "--env-stdin"])
+        #expect(with.envFromStdin)
+
+        let without = try ProtocolRequest.parse(["up", "--file", "c.yml"])
+        #expect(!without.envFromStdin)
+
+        // Accepted by every command's parser, not just one — `config` and
+        // `up` go through different loops, and the flag silently failing
+        // on one of them is exactly the bug this pins.
+        #expect(try ProtocolRequest.parse(["config", "--file", "c.yml", "--env-stdin"]).envFromStdin)
+        #expect(try ProtocolRequest.parse(["translate", "--file", "c.yml", "--env-stdin"]).envFromStdin)
+    }
+
+    @Test("Supplied variables outrank both the shell and the .env file")
+    func overridesWinOverEverything() throws {
+        // A caller passing a value for THIS invocation is a stronger
+        // statement of intent than either ambient source.
+        let document = """
+            services:
+              app:
+                image: nginx
+                environment:
+                  - KEY=${SOME_KEY}
+            """
+        let files = InMemoryProvider(["/project/.env": "SOME_KEY=from-dotenv\n"])
+        let plan = try Planner(files: files).plan(
+            document: document,
+            options: PlanOptions(
+                projectName: "proj",
+                directory: "/project",
+                variables: ["SOME_KEY": "from-override"]
+            )
+        )
+        let app = try #require(plan.service(named: "app"))
+        #expect(app.environment["KEY"] == "from-override")
+    }
+
+    @Test("Supplied variables satisfy the generated-variable check")
+    func overridesSatisfyTheGeneratedCheck() throws {
+        // A GUI that holds these can drive `up` without ever writing a
+        // .env beside the compose file.
+        let document = """
+            services:
+              app:
+                image: openclaw
+                environment:
+                  - AUTH_PASSWORD=${SERVICE_PASSWORD_OPENCLAW}
+            """
+        let plan = try Planner(files: InMemoryProvider([:])).plan(
+            document: document,
+            options: PlanOptions(
+                projectName: "proj",
+                variables: ["SERVICE_PASSWORD_OPENCLAW": "piped-in"]
+            )
+        )
+        let app = try #require(plan.service(named: "app"))
+        #expect(app.environment["AUTH_PASSWORD"] == "piped-in")
+    }
+
+    @Test("An empty supplied value does not count as set")
+    func emptyOverrideIsNotAValue() throws {
+        // Otherwise piping `KEY=` would silence the refusal while leaving
+        // the service exactly as broken as before.
+        let document = """
+            services:
+              app:
+                image: openclaw
+                environment:
+                  - AUTH_PASSWORD=${SERVICE_PASSWORD_OPENCLAW}
+            """
+        #expect(throws: PlanError.self) {
+            try Planner(files: InMemoryProvider([:])).plan(
+                document: document,
+                options: PlanOptions(projectName: "proj", variables: ["SERVICE_PASSWORD_OPENCLAW": ""])
+            )
+        }
+    }
+}

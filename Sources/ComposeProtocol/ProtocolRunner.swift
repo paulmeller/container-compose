@@ -935,6 +935,12 @@ public struct ProtocolRunner: Sendable {
         if let contents = files.contents(atPath: envPath) {
             variables.merge(Planner.parseEnvFile(contents)) { shellValue, _ in shellValue }
         }
+        // Highest precedence, above both the shell and the .env: these were
+        // passed for THIS invocation by a caller that knows what it wants,
+        // which is a stronger statement of intent than either. A GUI
+        // holding a user's API keys pipes them in this way rather than
+        // writing them beside the compose file.
+        variables.merge(request.envOverrides) { _, override in override }
         return variables
     }
 }
