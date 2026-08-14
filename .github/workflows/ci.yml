@@ -1,0 +1,68 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: build and test
+    # Swift 6.1 tools and a macOS 14 deployment target, so the runner has to be
+    # a recent macOS image — the Linux ones cannot build this at all, since the
+    # package targets Apple's `container` runtime.
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: swift --version
+
+      - name: Cache SwiftPM build artifacts
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: ${{ runner.os }}-spm-${{ hashFiles('Package.resolved', 'Package.swift') }}
+          restore-keys: ${{ runner.os }}-spm-
+
+      - name: Build
+        run: swift build --build-tests
+
+      # The fast suite only. The live suite drives a REAL `container` daemon,
+      # which needs Apple's virtualization stack and cannot run on a hosted
+      # runner — those tests skip themselves when the daemon is absent, so
+      # including them here would report a pass while running nothing. Run
+      # them locally:
+      #   swift test --filter "ComposeContainerRuntimeLiveTests"
+      - name: Test (fast suite, no daemon required)
+        run: |
+          swift test --filter "ComposeCoreTests|ComposeEngineTests|ComposeProtocolTests|ComposeCLIKitTests"
+
+      - name: Build the release binary
+        run: swift build -c release --product container-compose
+
+      # A real smoke test of the shipped binary, not a placeholder: `config`
+      # and `capabilities` are the two commands that need no daemon at all
+      # (planning is pure, and the capability manifest degrades to defaults
+      # when the runtime is absent), so both must succeed here — and an
+      # unknown command must still fail, which catches a binary that "works"
+      # by exiting zero unconditionally.
+      - name: Smoke-test the binary
+        run: |
+          set -euo pipefail
+          BIN=./.build/release/container-compose
+          printf 'services:\n  web:\n    image: nginx\n' > /tmp/ci-compose.yml
+
+          "$BIN" config --file /tmp/ci-compose.yml --project ci | grep -q '"web"'
+          "$BIN" capabilities > /dev/null
+
+          if "$BIN" definitely-not-a-command > /dev/null 2>&1; then
+            echo "an unknown command must exit non-zero" >&2
+            exit 1
+          fi
