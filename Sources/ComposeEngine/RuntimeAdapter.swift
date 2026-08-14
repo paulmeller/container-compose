@@ -52,6 +52,23 @@ public protocol RuntimeAdapter: Sendable {
     /// Pushes `image` to its registry.
     func pushImage(_ image: String) async throws
 
+    // MARK: Networks
+
+    /// Ensures `network` is usable before any container that references it is
+    /// created. A no-op when it already exists, the same contract as
+    /// `ensureImage` — the adapter decides what "exists" means for its runtime.
+    ///
+    /// The `external` flag is the whole distinction: an external network is
+    /// declared by the user as something this project does not own, so it must
+    /// be *required*, never created, and its absence is an error worth stating
+    /// plainly. A non-external network is this project's to create, and is
+    /// labelled with `projectName` so teardown can identify what it made.
+    ///
+    /// Returns whether this call created the network, so the engine can report
+    /// "created" and "already there" as different things rather than making a
+    /// consumer guess.
+    func ensureNetwork(_ network: PlannedNetwork, projectName: String) async throws -> Bool
+
     // MARK: Lifecycle
 
     /// Creates (but does not start) a container for `service`, running

@@ -38,3 +38,13 @@ struct WireStatus: Decodable {
 struct WireImageEntry: Decodable {
     let reference: String
 }
+
+/// `container network list --format json`. Only the name is read: existence is
+/// the entire question `ensureNetwork` asks, and decoding the subnet/gateway
+/// status block would couple this to fields that carry no meaning here.
+struct WireNetworkEntry: Decodable {
+    struct Configuration: Decodable {
+        let name: String
+    }
+    let configuration: Configuration
+}

@@ -96,6 +96,46 @@ public struct ContainerRuntimeAdapter: RuntimeAdapter {
         }
     }
 
+    // MARK: - Networks
+
+    public func ensureNetwork(_ network: PlannedNetwork, projectName: String) async throws -> Bool {
+        if try networkExists(network.resolvedName) { return false }
+
+        // An external network is explicitly declared as not this project's to
+        // manage, so creating one silently would be wrong twice over: it would
+        // invent infrastructure the user said already existed, and it would
+        // hide a genuine misconfiguration (a typo, or a stack that was never
+        // brought up) behind a network with no containers on it.
+        guard !network.external else {
+            throw AdapterError.message(
+                "network '\(network.resolvedName)' is declared external but does not exist — "
+                    + "create it first (`container network create \(network.resolvedName)`), "
+                    + "or drop `external: true` to have this project create it"
+            )
+        }
+
+        // Labelled with the project so teardown can tell the networks this
+        // project created apart from ones that merely happened to be present,
+        // the same ownership rule the containers already follow.
+        try ContainerCLI.run([
+            "network", "create",
+            "--label", "com.docker.compose.project=\(projectName)",
+            network.resolvedName,
+        ])
+        return true
+    }
+
+    private func networkExists(_ name: String) throws -> Bool {
+        let result = try ContainerCLI.run(["network", "list", "--format", "json"])
+        guard let data = result.stdout.data(using: .utf8),
+            !result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            return false
+        }
+        let entries = (try? JSONDecoder().decode([WireNetworkEntry].self, from: data)) ?? []
+        return entries.contains { $0.configuration.name == name }
+    }
+
     public func buildImage(for service: PlannedService, projectName: String) async throws -> String {
         guard let build = service.build else {
             throw AdapterError.message("service '\(service.name)' has no build configuration")

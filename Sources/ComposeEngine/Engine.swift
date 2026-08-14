@@ -42,6 +42,25 @@ public actor Engine {
 
         emit(.planned(services: plan.services.map(\.name), waves: plan.waves))
 
+        // Networks come before the first wave, not alongside it: a container
+        // referencing a network that does not exist fails at create time, and
+        // every service in the project would fail the same way for the same
+        // reason. Failing once, up front, says it once — and leaves nothing
+        // half-created behind.
+        for network in plan.networks {
+            do {
+                let created = try await adapter.ensureNetwork(network, projectName: plan.projectName)
+                emit(.networkReady(network: network.resolvedName, created: created))
+            } catch {
+                emit(.networkFailed(network: network.resolvedName, reason: "\(error)"))
+                for service in plan.services {
+                    emit(.serviceSkipped(service: service.name, reason: .networkUnavailable))
+                }
+                emit(.done(success: false, ready: [], failed: [], skipped: plan.services.map(\.name)))
+                return events
+            }
+        }
+
         let observed = (try? await adapter.observe(projectName: plan.projectName)) ?? []
         let waves = Reconciler.plan(desired: plan, observed: observed)
 

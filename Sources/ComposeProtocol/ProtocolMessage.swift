@@ -42,6 +42,14 @@ public struct ProtocolMessage: Codable, Sendable, Equatable {
     public let reused: Bool?
     public let reason: String?
 
+    // Present on network_ready and network_failed: the resolved network name,
+    // which is what actually exists in the runtime — not the key written in
+    // the compose file, since a consumer inspecting the runtime would find
+    // nothing under that. `reused` above carries created-vs-already-there,
+    // reusing the same field service_ready uses for the same distinction;
+    // `reason` carries the failure text.
+    public let network: String?
+
     // Present on done.
     public let success: Bool?
     public let ready: [String]?
@@ -100,7 +108,8 @@ public struct ProtocolMessage: Codable, Sendable, Equatable {
         ports: [String]? = nil,
         line: String? = nil,
         output: String? = nil,
-        action: String? = nil
+        action: String? = nil,
+        network: String? = nil
     ) {
         self.version = Self.currentVersion
         self.type = type
@@ -124,6 +133,7 @@ public struct ProtocolMessage: Codable, Sendable, Equatable {
         self.line = line
         self.output = output
         self.action = action
+        self.network = network
     }
 
     public enum MessageType: String, Codable, Sendable {
@@ -140,6 +150,12 @@ public struct ProtocolMessage: Codable, Sendable, Equatable {
         case imageReady = "image_ready"
         case serviceFailed = "service_failed"
         case serviceSkipped = "service_skipped"
+        /// A declared network is available — `reused` says whether this run
+        /// created it or found it already there.
+        case networkReady = "network_ready"
+        /// A declared network could not be made available; nothing was
+        /// created, and every service is skipped.
+        case networkFailed = "network_failed"
         case done
         case error
         /// One observed container — ps/ls/images/port.
@@ -184,6 +200,12 @@ extension ProtocolMessage {
 
         case .serviceSkipped(let service, let reason):
             self.init(type: .serviceSkipped, service: service, reason: reason.rawValue)
+
+        case .networkReady(let network, let created):
+            self.init(type: .networkReady, reused: !created, network: network)
+
+        case .networkFailed(let network, let reason):
+            self.init(type: .networkFailed, reason: reason, network: network)
 
         case .done(let success, let ready, let failed, let skipped):
             self.init(type: .done, success: success, ready: ready, failed: failed, skipped: skipped)

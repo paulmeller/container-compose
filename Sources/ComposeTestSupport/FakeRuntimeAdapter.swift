@@ -34,6 +34,7 @@ public actor FakeRuntimeAdapter: RuntimeAdapter {
         case startFailed(String)
         case healthcheckFailed(String)
         case notFound(String)
+        case networkUnavailable(String)
     }
 
     public private(set) var containers: [String: FakeContainer] = [:]
@@ -45,6 +46,14 @@ public actor FakeRuntimeAdapter: RuntimeAdapter {
     public private(set) var copies: [(source: String, destination: String)] = []
     public private(set) var pushedImages: [String] = []
     public private(set) var exports: [(containerID: String, outputPath: String)] = []
+    /// Every network Engine asked for, in call order — the assertion that
+    /// networks are ensured at all, and before any container exists.
+    public private(set) var ensuredNetworks: [String] = []
+    /// The subset of those that did not already exist and so were created.
+    /// Kept separate from `ensuredNetworks` so a test can tell "required an
+    /// external network" apart from "made a new one".
+    public private(set) var createdNetworks: [String] = []
+    private var existingNetworks: Set<String> = []
     private var nextID = 0
 
     public init() {}
@@ -71,15 +80,24 @@ public actor FakeRuntimeAdapter: RuntimeAdapter {
         logs[containerID] = lines
     }
 
+    /// Seeds a network as already present, by resolved name — how a test sets
+    /// up "this external network exists" or "this one was created by an
+    /// earlier run".
+    public func seedNetwork(_ resolvedName: String) {
+        existingNetworks.insert(resolvedName)
+    }
+
     /// Calls to fail on, by matching image or service name — lets a test
     /// inject a specific failure without a real registry or runtime.
     private var imagesToFail: Set<String> = []
     private var servicesToFailCreate: Set<String> = []
     private var servicesToFailBuild: Set<String> = []
+    private var networksToFail: Set<String> = []
 
     public func failImage(_ image: String) { imagesToFail.insert(image) }
     public func failCreate(forService service: String) { servicesToFailCreate.insert(service) }
     public func failBuild(forService service: String) { servicesToFailBuild.insert(service) }
+    public func failNetwork(_ resolvedName: String) { networksToFail.insert(resolvedName) }
 
     // MARK: Observation
 
@@ -118,6 +136,22 @@ public actor FakeRuntimeAdapter: RuntimeAdapter {
 
     public func pushImage(_ image: String) async throws {
         pushedImages.append(image)
+    }
+
+    // MARK: Networks
+
+    public func ensureNetwork(_ network: PlannedNetwork, projectName: String) async throws -> Bool {
+        ensuredNetworks.append(network.resolvedName)
+        if networksToFail.contains(network.resolvedName) {
+            throw Failure.networkUnavailable(network.resolvedName)
+        }
+        if existingNetworks.contains(network.resolvedName) { return false }
+        // An external network is the user's to provide: absent means the run
+        // cannot proceed, not that the fake should invent one.
+        if network.external { throw Failure.networkUnavailable(network.resolvedName) }
+        existingNetworks.insert(network.resolvedName)
+        createdNetworks.append(network.resolvedName)
+        return true
     }
 
     // MARK: Lifecycle

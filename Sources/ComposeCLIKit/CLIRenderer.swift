@@ -77,6 +77,18 @@ public final class CLIRenderer: @unchecked Sendable {
         case .serviceSkipped:
             return column(message.service) + "skipped (\(message.reason ?? "unknown reason"))"
 
+        case .networkReady:
+            // Networks are project-level, not per-service, so "network" takes
+            // the service column rather than the message sitting under one of
+            // them — the same placement `docker compose` uses for "Network x
+            // Created".
+            let mode = message.reused == true ? "exists" : "created"
+            return column("network") + "\(mode) -> \(message.network ?? "?")"
+
+        case .networkFailed:
+            return column("network")
+                + "FAILED: \(message.network ?? "?") — \(message.reason ?? "unknown error")"
+
         case .done:
             let ready = message.ready ?? []
             let failed = message.failed ?? []

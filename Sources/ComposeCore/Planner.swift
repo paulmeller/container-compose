@@ -105,8 +105,23 @@ public struct Planner: Sendable {
 
         // 4. Resolve each selected service into a value.
         var planned: [PlannedService] = []
+        // Resolved before the services, because a service's `networks:` list
+        // holds compose-file keys while the runtime only knows resolved names
+        // — `backend` under project `proj` is created as `proj_backend`.
+        // Passing the mapping down keeps the Plan's contract intact: what a
+        // service references is what actually exists.
+        let networks = resolveNetworks(root, options: options)
+        let networkNames = Dictionary(
+            networks.map { ($0.name, $0.resolvedName) },
+            uniquingKeysWith: { first, _ in first }
+        )
+
         for name in selected.sorted() {
-            planned.append(try resolveService(name: name, raw: merged[name] ?? [:], options: options))
+            planned.append(
+                try resolveService(
+                    name: name, raw: merged[name] ?? [:], options: options, networkNames: networkNames
+                )
+            )
         }
 
         // 5. Order, and group into concurrently-startable waves.
@@ -120,7 +135,7 @@ public struct Planner: Sendable {
             services: ordered,
             waves: waves,
             volumes: resolveVolumes(root, options: options),
-            networks: resolveNetworks(root, options: options)
+            networks: networks
         )
     }
 
@@ -157,7 +172,12 @@ public struct Planner: Sendable {
 
     // MARK: - Service resolution
 
-    private func resolveService(name: String, raw: [String: Any], options: PlanOptions) throws -> PlannedService {
+    private func resolveService(
+        name: String,
+        raw: [String: Any],
+        options: PlanOptions,
+        networkNames: [String: String] = [:]
+    ) throws -> PlannedService {
         var variables = options.variables
 
         // `env_file` contributes variables to the service's own environment,
@@ -213,7 +233,11 @@ public struct Planner: Sendable {
             environment: environment,
             ports: try stringList(raw["ports"]).map(interpolate),
             volumes: try stringList(raw["volumes"]).map(interpolate),
-            networks: try stringList(raw["networks"]).map(interpolate),
+            // A reference with no matching top-level entry passes through
+            // unchanged rather than erroring: Compose allows it, and the
+            // runtime's own "network not found" is a better message than a
+            // planning-time guess about which of the two the user meant.
+            networks: try stringList(raw["networks"]).map(interpolate).map { networkNames[$0] ?? $0 },
             labels: labels,
             dependsOn: Self.dependsOn(raw),
             healthcheck: Self.healthcheck(raw["healthcheck"]),
@@ -353,9 +377,17 @@ public struct Planner: Sendable {
             let config = declared[name] as? [String: Any]
             let external = (config?["external"] as? Bool) == true
             let explicit = config?["name"] as? String
+            // The derived name is lowercased for the same reason build tags
+            // are: the runtime rejects an uppercase network name outright
+            // ("invalid network name"), so a project named `MyApp` — from a
+            // directory name or an explicit `--project` — would otherwise
+            // fail at create time with nothing pointing at the cause. An
+            // explicit `name:` is left exactly as written: the user named a
+            // specific network, and silently renaming it would attach the
+            // project to something other than what they asked for.
             return PlannedNetwork(
                 name: name,
-                resolvedName: explicit ?? (external ? name : "\(options.projectName)_\(name)"),
+                resolvedName: explicit ?? (external ? name : "\(options.projectName)_\(name)".lowercased()),
                 external: external
             )
         }

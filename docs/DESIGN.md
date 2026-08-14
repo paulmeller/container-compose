@@ -110,7 +110,7 @@ Tests/
                                InMemoryProvider) specifically so path
                                resolution can't hide behind that fake's
                                deliberately lenient basename fallback.
-  ComposeEngineTests/          26 tests against the in-memory fake, ~1s
+  ComposeEngineTests/          32 tests against the in-memory fake, ~1s
                                (dominated by one deliberate `wait` timeout).
   ComposeProtocolTests/        68 tests, request parsing + wire mapping + full
                                runs against the fake — no process spawn —
@@ -118,14 +118,19 @@ Tests/
                                real temp directories and real kqueue events.
   ComposeCLIKitTests/          20 tests of pure rendering logic.
   ComposeContainerRuntimeLiveTests/
-                               14 tests against a REAL `container` daemon —
+                               18 tests against a REAL `container` daemon —
                                the one place a wrong runtime assumption
                                could hide from every test above it. Caught
-                               three live-only bugs this way: a one-off
+                               five live-only bugs this way: a one-off
                                `run` container colliding with the managed
                                one, `./`-prefixed watch paths truncating
-                               synced filenames, and uppercase project
-                               names producing an invalid OCI image tag.
+                               synced filenames, uppercase project names
+                               producing an invalid OCI image tag, services
+                               referencing a network by its compose key
+                               while it is created under its resolved name,
+                               and uppercase project names again — this
+                               time producing a network name the runtime
+                               rejects outright.
 ```
 
 ## Command routing
@@ -248,6 +253,38 @@ state, what is the minimal set of actions?**
 
 "Config changed" is decidable because the plan is a value: hash the resolved
 service definition, store it as a label, compare on the next reconcile.
+
+## Networks
+
+Declared networks are ensured once, before the first wave — not per service.
+A container that references a network which does not exist fails at create
+time, and every service in the project would fail the same way for the same
+reason; failing once, up front, says it once and leaves nothing half-created.
+
+The rules, and why each one is what it is:
+
+- **Non-external networks are this project's to create.** They resolve to
+  `<project>_<key>`, lowercased — the runtime rejects an uppercase network
+  name outright, so a project named `MyApp` would otherwise fail at create
+  time with nothing pointing at the cause. They are labelled with
+  `com.docker.compose.project`, the same ownership rule the containers follow,
+  so teardown can tell what this project made from what merely happened to be
+  present.
+- **External networks are required, never created.** Creating one silently
+  would invent infrastructure the user said already existed, and hide a
+  genuine misconfiguration behind a network with no containers on it. Absent
+  means the run stops, with a message naming the network and both ways out.
+- **An explicit `name:` is used exactly as written.** The user named a
+  specific network; silently renaming it would attach the project to something
+  other than what they asked for.
+- **A service's `networks:` list is resolved in the plan, not the adapter.**
+  The compose file says `backend`; the runtime only knows `proj_backend`.
+  Resolving it in the pure layer is what keeps the Plan's contract honest —
+  what a service references is what actually exists.
+
+Reused rather than recreated, like everything else here: an existing network
+is reported as found, and `networkReady` carries `created` so a consumer can
+say which happened rather than guess.
 
 ## Runtime facts worth writing down
 

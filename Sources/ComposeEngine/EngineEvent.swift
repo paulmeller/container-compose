@@ -28,6 +28,12 @@ public enum SkipReason: String, Codable, Sendable {
     /// A dependency's wave failed, so this service — which depended on it —
     /// was never reached.
     case dependencyFailed
+
+    /// A network the project declares could not be made available, so no
+    /// container was attempted. Distinct from `dependencyFailed`: nothing in
+    /// the project ran, and retrying a single service cannot help until the
+    /// network itself is fixed.
+    case networkUnavailable
 }
 
 /// What `imageReady` reports having happened to the image. Distinguishing
@@ -74,6 +80,19 @@ public enum EngineEvent: Sendable, Equatable {
     /// `action` says which, so this reads correctly even outside the context
     /// of knowing which top-level command emitted it.
     case imageReady(service: String, image: String, action: ImageAction)
+
+    /// A network the project declares is available. `created` distinguishes
+    /// "this run made it" from "it was already there" — the same reuse-vs-new
+    /// distinction `serviceReady` draws, and for the same reason: a consumer
+    /// showing progress needs to say which happened.
+    case networkReady(network: String, created: Bool)
+
+    /// A declared network could not be made available. Carries the reason as
+    /// text because the actionable part is runtime-specific (an external
+    /// network that does not exist needs a different fix from a create that
+    /// was refused), and no enum of causes would survive contact with a second
+    /// runtime.
+    case networkFailed(network: String, reason: String)
 
     /// A service failed. `service.state` is not set to failed separately —
     /// this event is the terminal state.
