@@ -121,9 +121,42 @@ struct ExtendsResolver {
                 continue
             }
 
+            // `environment` and `labels` are writable either as a mapping
+            // or as a list of `KEY=VALUE`, and both forms mean the same
+            // thing — so both have to merge per key. Matching only the
+            // mapping form left the list form replacing the whole list,
+            // silently dropping every variable the base declared that the
+            // override did not restate.
+            if mergedMappings.contains(key), let baseList = baseValue as? [Any], let localList = localValue as? [Any] {
+                result[key] = mergeEntryLists(local: localList, onto: baseList)
+                continue
+            }
+
             result[key] = localValue
         }
 
+        return result
+    }
+
+    /// Merge two `KEY=VALUE` lists by key, keeping the base's order and
+    /// appending anything new. A bare `FOO` with no `=` is a valid entry
+    /// (it inherits from the environment), and keys on it the same way.
+    private static func mergeEntryLists(local: [Any], onto base: [Any]) -> [Any] {
+        func key(of entry: Any) -> String {
+            let text = "\(entry)"
+            guard let separator = text.firstIndex(of: "=") else { return text }
+            return String(text[text.startIndex..<separator])
+        }
+
+        var result = base
+        for entry in local {
+            let entryKey = key(of: entry)
+            if let existing = result.firstIndex(where: { key(of: $0) == entryKey }) {
+                result[existing] = entry
+            } else {
+                result.append(entry)
+            }
+        }
         return result
     }
 }

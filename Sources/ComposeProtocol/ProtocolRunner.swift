@@ -34,7 +34,7 @@ public struct ProtocolRunner: Sendable {
     /// kept here rather than in Package.swift because it is the value the
     /// `version` command prints — a consumer checking whether the binary
     /// supports what it needs reads this, not the package manifest.
-    public static let version = "0.2.1"
+    public static let version = "0.2.2"
 
     private let adapter: RuntimeAdapter
     private let capabilities: RuntimeCapabilities
@@ -359,7 +359,7 @@ public struct ProtocolRunner: Sendable {
             onMessage(.errorMessage("translate needs a compose file: pass --file"))
             return 1
         }
-        guard let document = files.contents(atPath: composePath) else {
+        guard let document = try? loadMergedDocument(request), !document.isEmpty else {
             onMessage(.errorMessage("could not read '\(composePath)'"))
             return 1
         }
@@ -873,13 +873,34 @@ public struct ProtocolRunner: Sendable {
 
     // MARK: - Planning
 
+
+    /// Load every `-f` in order and merge them into the single document
+    /// the planner works from. One file is returned as-is; the merge only
+    /// engages when a caller actually passed an override.
+    private func loadMergedDocument(_ request: ProtocolRequest) throws -> String? {
+        var documents: [String] = []
+        for path in request.composeFilePaths {
+            guard let contents = files.contents(atPath: path) else { return nil }
+            documents.append(contents)
+        }
+        guard !documents.isEmpty else { return nil }
+        return try ComposeFileMerge.merge(documents: documents)
+    }
+
     private func resolvePlan(_ request: ProtocolRequest, requestedServices: [String], onMessage: @escaping @Sendable (ProtocolMessage) -> Void) -> Plan? {
         guard let path = request.composeFilePath else {
             onMessage(.errorMessage("no compose file given"))
             return nil
         }
-        guard let document = files.contents(atPath: path) else {
-            onMessage(.errorMessage("compose file not found at '\(path)'"))
+        let document: String
+        do {
+            guard let merged = try loadMergedDocument(request) else {
+                onMessage(.errorMessage("compose file not found at '\(path)'"))
+                return nil
+            }
+            document = merged
+        } catch {
+            onMessage(.errorMessage("\(error)"))
             return nil
         }
         guard let projectName = resolveProjectName(request, onMessage: onMessage) else { return nil }
@@ -909,7 +930,7 @@ public struct ProtocolRunner: Sendable {
     /// `runPassthrough`, which has no message stream to emit onto.
     private func resolvePlanPlain(_ request: ProtocolRequest, requestedServices: [String]) -> Plan? {
         guard let path = request.composeFilePath,
-              let document = files.contents(atPath: path),
+              let document = try? loadMergedDocument(request),
               let projectName = resolveProjectNamePlain(request) else { return nil }
 
         let directory = URL(fileURLWithPath: path).deletingLastPathComponent().path

@@ -60,7 +60,15 @@ public struct ProtocolRequest: Sendable, Equatable {
     /// Required for every command that plans a project (everything except
     /// `capabilities`, `ls`, and lifecycle commands given an explicit
     /// `--project`); unused otherwise.
-    public var composeFilePath: String?
+    public var composeFilePath: String? {
+        get { composeFilePaths.first }
+        set { composeFilePaths = newValue.map { [$0] } ?? [] }
+    }
+    /// Every `-f` given, in order, each overriding the ones before it —
+    /// the shape `docker compose -f base.yml -f override.yml` has, and
+    /// what lets a catalog template stay pristine while a local file
+    /// adjusts it. Usually one entry, which `composeFilePath` returns.
+    public var composeFilePaths: [String] = []
     /// Explicit project name; when nil, derived from the compose file's
     /// containing directory — the same convention Compose itself uses.
     public var projectName: String?
@@ -90,7 +98,10 @@ public struct ProtocolRequest: Sendable, Equatable {
         profiles: Set<String> = []
     ) {
         self.command = command
-        self.composeFilePath = composeFilePath
+        // Assigns the stored property directly: `composeFilePath` is
+        // computed, and Swift will not route through a setter before
+        // every stored property has a value.
+        self.composeFilePaths = composeFilePath.map { [$0] } ?? []
         self.projectName = projectName
         self.envFilePath = envFilePath
         self.envFromStdin = envFromStdin
@@ -198,7 +209,7 @@ public struct ProtocolRequest: Sendable, Equatable {
 
     private static func parseExecOrRun(_ commandName: String, _ arguments: [String]) throws -> ProtocolRequest {
         var rest = arguments
-        var composeFilePath: String?
+        var composeFilePaths: [String] = []
         var projectName: String?
         var envFilePath: String?
         var envFromStdin = false
@@ -216,7 +227,7 @@ public struct ProtocolRequest: Sendable, Equatable {
             let token = rest.removeFirst()
             switch token {
             case "--file", "-f":
-                composeFilePath = try takeValue(token)
+                composeFilePaths.append(try takeValue(token))
             case "--project", "-p":
                 projectName = try takeValue(token)
             case "--env-file":
@@ -249,19 +260,20 @@ public struct ProtocolRequest: Sendable, Equatable {
         if rest.first == "--" { rest.removeFirst() }
         let command = rest
 
-        let base = ProtocolRequest(
+        var base = ProtocolRequest(
             command: .capabilities,
-            composeFilePath: composeFilePath,
+            composeFilePath: composeFilePaths.first,
             projectName: projectName,
             envFilePath: envFilePath,
             envFromStdin: envFromStdin,
             profiles: profiles
         )
+        base.composeFilePaths = composeFilePaths
 
         if commandName == "exec" {
             return base.with(.exec(service: service, command: command, tty: !noTTY))
         }
-        guard composeFilePath != nil else { throw ParseError.missingRequiredFlag(command: commandName, flag: "--file") }
+        guard !composeFilePaths.isEmpty else { throw ParseError.missingRequiredFlag(command: commandName, flag: "--file") }
         // Matches `docker compose run`: the container is NOT removed after it
         // exits unless `--remove` (its `--rm`) is given — the opposite
         // default from `up`/`down`'s own container lifecycle, since a one-off
@@ -272,7 +284,7 @@ public struct ProtocolRequest: Sendable, Equatable {
     private static func parseRemaining(_ commandName: String, _ arguments: [String]) throws -> ProtocolRequest {
         var rest = arguments
 
-        var composeFilePath: String?
+        var composeFilePaths: [String] = []
         var projectName: String?
         var envFilePath: String?
         var profiles: Set<String> = []
@@ -298,7 +310,7 @@ public struct ProtocolRequest: Sendable, Equatable {
             let token = rest.removeFirst()
             switch token {
             case "--file", "-f":
-                composeFilePath = try takeValue(token)
+                composeFilePaths.append(try takeValue(token))
             case "--project", "-p":
                 projectName = try takeValue(token)
             case "--env-file":
@@ -340,17 +352,18 @@ public struct ProtocolRequest: Sendable, Equatable {
         }
 
         func requireFile() throws {
-            guard composeFilePath != nil else { throw ParseError.missingRequiredFlag(command: commandName, flag: "--file") }
+            guard !composeFilePaths.isEmpty else { throw ParseError.missingRequiredFlag(command: commandName, flag: "--file") }
         }
 
-        let base = ProtocolRequest(
+        var base = ProtocolRequest(
             command: .capabilities,
-            composeFilePath: composeFilePath,
+            composeFilePath: composeFilePaths.first,
             projectName: projectName,
             envFilePath: envFilePath,
             envFromStdin: envFromStdin,
             profiles: profiles
         )
+        base.composeFilePaths = composeFilePaths
 
         switch commandName {
         case "capabilities":
