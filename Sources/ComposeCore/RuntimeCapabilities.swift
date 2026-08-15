@@ -94,13 +94,13 @@ extension RuntimeCapabilities {
             "mem_limit": "--memory",
         ],
         booleanFlags: [
-            "privileged": "--privileged",
             "read_only": "--read-only",
             "init": "--init",
             "stdin_open": "-i",
             "tty": "-t",
         ],
         unsupported: [
+            "privileged": "the runtime has no --privileged flag; a container cannot be given elevated host access",
             "restart": "the runtime has no restart-policy flag; containers are never restarted automatically",
             "configs": "a Swarm feature with no mount equivalent; nothing is placed in the container",
             "secrets": "a Swarm feature with no mount equivalent; nothing appears at /run/secrets",

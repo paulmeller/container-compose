@@ -11,6 +11,31 @@ import Foundation
 /// mechanics (argv construction, pipe draining, exit-code handling) are in one
 /// place rather than repeated at every call site.
 enum ContainerCLI {
+    /// Run a command whose failure must not abort the caller — but must
+    /// not vanish either.
+    ///
+    /// `try?` is the obvious way to write "best effort", and it is how
+    /// the worst bugs in this project have hidden. A teardown that
+    /// deleted nothing looked identical to one that deleted everything,
+    /// so a network leaked on every test run until the accumulated pile
+    /// stopped the daemon booting — nothing failed loudly at any point,
+    /// and the only symptom surfaced much later, somewhere else.
+    ///
+    /// The diagnostic goes to stderr deliberately: stdout carries the
+    /// NDJSON protocol, so a line there would corrupt the stream a
+    /// machine consumer is parsing, and stderr is already captured and
+    /// surfaced by those consumers.
+    @discardableResult
+    static func attempt(_ arguments: [String], describedAs description: String) -> Bool {
+        do {
+            _ = try run(arguments)
+            return true
+        } catch {
+            FileHandle.standardError.write(Data("container-compose: could not \(description): \(error)\n".utf8))
+            return false
+        }
+    }
+
     struct Result {
         let exitCode: Int32
         let stdout: String

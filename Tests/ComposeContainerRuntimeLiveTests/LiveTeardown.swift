@@ -16,6 +16,7 @@
 
 import Foundation
 @testable import ComposeContainerRuntime
+import ComposeCore
 
 enum LiveTeardown {
     /// Delete a network, retrying while the runtime still considers it in
@@ -35,13 +36,13 @@ enum LiveTeardown {
     /// rather than swept by prefix: these suites run in parallel, and a
     /// sweep could take a network a concurrent test was still setting up.
     ///
-    /// Lowercased, because the planner lowercases derived network names —
-    /// the runtime rejects an uppercase one. These suites name projects
-    /// after a UUID, whose hex is uppercase, so deleting
-    /// `\(projectName)_default` verbatim asked for a name that had never
-    /// existed and silently removed nothing.
+    /// Uses the product's own naming rather than rebuilding the string.
+    /// Rebuilding it is exactly how this leaked: the teardown wrote
+    /// `\(projectName)_default` without the lowercasing the planner
+    /// applies, so it asked to delete a name that had never existed and
+    /// silently removed nothing, once per test.
     static func removeProjectNetwork(_ projectName: String) {
-        removeNetwork("\(projectName.lowercased())_default")
+        removeNetwork(ProjectNaming.defaultNetworkName(project: projectName))
     }
 
     private static func exists(_ name: String) -> Bool {

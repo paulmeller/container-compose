@@ -505,7 +505,9 @@ public struct Planner: Sendable {
             let explicit = config?["name"] as? String
             return PlannedVolume(
                 name: name,
-                resolvedName: explicit ?? (external ? name : "\(options.projectName)_\(name)"),
+                resolvedName: ProjectNaming.volumeName(
+                    project: options.projectName, declared: name, explicit: explicit, external: external
+                ),
                 external: external
             )
         }
@@ -525,7 +527,7 @@ public struct Planner: Sendable {
     static func defaultNetwork(projectName: String) -> PlannedNetwork {
         PlannedNetwork(
             name: "default",
-            resolvedName: "\(projectName)_default".lowercased(),
+            resolvedName: ProjectNaming.defaultNetworkName(project: projectName),
             external: false
         )
     }
@@ -546,7 +548,9 @@ public struct Planner: Sendable {
             // project to something other than what they asked for.
             return PlannedNetwork(
                 name: name,
-                resolvedName: explicit ?? (external ? name : "\(options.projectName)_\(name)".lowercased()),
+                resolvedName: ProjectNaming.networkName(
+                    project: options.projectName, declared: name, explicit: explicit, external: external
+                ),
                 external: external
             )
         }

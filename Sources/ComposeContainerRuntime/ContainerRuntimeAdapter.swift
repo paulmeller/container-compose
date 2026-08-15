@@ -167,7 +167,9 @@ public struct ContainerRuntimeAdapter: RuntimeAdapter {
             // is not a failure worth aborting teardown over: the containers
             // this project owns are already gone by now, so anything left is
             // someone else's and deleting it would be wrong anyway.
-            if (try? ContainerCLI.run(["network", "delete", name])) != nil { removed.append(name) }
+            if ContainerCLI.attempt(["network", "delete", name], describedAs: "remove network \(name)") {
+                removed.append(name)
+            }
         }
         // The project's addresses die with its network. Left behind, the
         // file would seed the next `up` with addresses the runtime has
@@ -269,7 +271,9 @@ public struct ContainerRuntimeAdapter: RuntimeAdapter {
 
         var removed: [String] = []
         for name in owned {
-            if (try? ContainerCLI.run(["volume", "delete", name])) != nil { removed.append(name) }
+            if ContainerCLI.attempt(["volume", "delete", name], describedAs: "remove volume \(name)") {
+                removed.append(name)
+            }
         }
         return removed
     }
@@ -287,7 +291,7 @@ public struct ContainerRuntimeAdapter: RuntimeAdapter {
         // reject the reference outright. Compose itself lowercases derived
         // project names for the same reason; this reaches the same result
         // without constraining what `--project`/directory names may contain.
-        let tag = service.image ?? "\(projectName.lowercased())/\(service.name.lowercased()):latest"
+        let tag = service.image ?? ProjectNaming.buildTag(project: projectName, service: service.name)
 
         var args = ["build", build.context, "--tag", tag]
         if let dockerfile = build.dockerfile { args.append(contentsOf: ["--file", dockerfile]) }
@@ -372,7 +376,7 @@ public struct ContainerRuntimeAdapter: RuntimeAdapter {
             }
             .joined(separator: "\n")
         var rebuilt = kept.isEmpty || kept.hasSuffix("\n") ? kept : kept + "\n"
-        rebuilt += "\(address) \(service) \(projectName)-\(service)\n"
+        rebuilt += "\(address) \(service) \(ProjectNaming.containerName(project: projectName, service: service))\n"
         try rebuilt.write(to: url, atomically: true, encoding: .utf8)
     }
 
@@ -397,7 +401,7 @@ public struct ContainerRuntimeAdapter: RuntimeAdapter {
     // MARK: - Lifecycle
 
     public func createContainer(for service: PlannedService, image: String, projectName: String) async throws -> String {
-        let name = "\(projectName)-\(service.name)"
+        let name = ProjectNaming.containerName(project: projectName, service: service.name)
         var args = ["create", "--name", name, "-l", "com.docker.compose.project=\(projectName)", "-l", "com.docker.compose.service=\(service.name)"]
         args.append(contentsOf: ["-l", "\(Self.configHashLabel)=\(service.configHash)"])
 
@@ -543,7 +547,15 @@ public struct ContainerRuntimeAdapter: RuntimeAdapter {
         // afterward — success or failure, via `defer`.
         let wasRunning = try listContainers().first { $0.containerID == containerID }?.running ?? false
         if wasRunning { try ContainerCLI.run(["stop", containerID]) }
-        defer { if wasRunning { _ = try? ContainerCLI.run(["start", containerID]) } }
+        // A failure here leaves a container the user had running
+        // stopped, against the promise made just above — so it is
+        // reported rather than swallowed, even though it cannot abort an
+        // export that has already succeeded.
+        defer {
+            if wasRunning {
+                ContainerCLI.attempt(["start", containerID], describedAs: "restart \(containerID) after export")
+            }
+        }
         try ContainerCLI.run(["export", "--output", outputPath, containerID])
     }
 
