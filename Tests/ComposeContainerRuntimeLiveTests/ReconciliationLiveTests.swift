@@ -34,9 +34,20 @@ struct ReconciliationLiveTests {
 
     /// Best-effort teardown, run before and after each test so a prior failed
     /// run never contaminates the next one.
-    private func cleanUp(containerName: String) {
+    /// Also removes the project's default network.
+    ///
+    /// Deleting only the container left `<project>_default` behind on
+    /// every run — the pile that eventually wedged the runtime, because
+    /// each network is a launchd service the daemon waits on at boot.
+    /// Scoped to this test's own project rather than swept by prefix:
+    /// these suites run in parallel, and a sweep could take a network a
+    /// concurrent test was still setting up.
+    private func cleanUp(containerName: String, projectName: String? = nil) {
         _ = try? ContainerCLI.run(["stop", containerName])
         _ = try? ContainerCLI.run(["delete", "--force", containerName])
+        if let projectName {
+            LiveTeardown.removeProjectNetwork(projectName)
+        }
     }
 
     @Test("A fresh service is created and reaches running")
@@ -48,8 +59,8 @@ struct ReconciliationLiveTests {
 
         let projectName = "cc-live-\(UUID().uuidString.prefix(8))"
         let containerName = "\(projectName)-app"
-        cleanUp(containerName: containerName)
-        defer { cleanUp(containerName: containerName) }
+        cleanUp(containerName: containerName, projectName: projectName)
+        defer { cleanUp(containerName: containerName, projectName: projectName) }
 
         let result = try plan("""
             services:
@@ -87,8 +98,8 @@ struct ReconciliationLiveTests {
 
         let projectName = "cc-live-\(UUID().uuidString.prefix(8))"
         let containerName = "\(projectName)-app"
-        cleanUp(containerName: containerName)
-        defer { cleanUp(containerName: containerName) }
+        cleanUp(containerName: containerName, projectName: projectName)
+        defer { cleanUp(containerName: containerName, projectName: projectName) }
 
         let document = """
             services:
@@ -149,8 +160,8 @@ struct ReconciliationLiveTests {
 
         let projectName = "cc-live-\(UUID().uuidString.prefix(8))"
         let containerName = "\(projectName)-app"
-        cleanUp(containerName: containerName)
-        defer { cleanUp(containerName: containerName) }
+        cleanUp(containerName: containerName, projectName: projectName)
+        defer { cleanUp(containerName: containerName, projectName: projectName) }
 
         let adapter = ContainerRuntimeAdapter()
 
@@ -207,8 +218,8 @@ struct ReconciliationLiveTests {
 
         let projectName = "cc-live-\(UUID().uuidString.prefix(8))"
         let containerName = "\(projectName)-app"
-        cleanUp(containerName: containerName)
-        defer { cleanUp(containerName: containerName) }
+        cleanUp(containerName: containerName, projectName: projectName)
+        defer { cleanUp(containerName: containerName, projectName: projectName) }
 
         let adapter = ContainerRuntimeAdapter()
         let result = try plan("""
@@ -262,8 +273,8 @@ struct ReconciliationLiveTests {
 
         let projectName = "cc-live-\(UUID().uuidString.prefix(8))"
         let containerName = "\(projectName)-app"
-        cleanUp(containerName: containerName)
-        defer { cleanUp(containerName: containerName) }
+        cleanUp(containerName: containerName, projectName: projectName)
+        defer { cleanUp(containerName: containerName, projectName: projectName) }
 
         let adapter = ContainerRuntimeAdapter()
         let result = try plan("""

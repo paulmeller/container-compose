@@ -36,7 +36,7 @@ struct NetworkLiveTests {
     private func cleanUp(containerName: String, networkName: String) {
         _ = try? ContainerCLI.run(["stop", containerName])
         _ = try? ContainerCLI.run(["delete", "--force", containerName])
-        _ = try? ContainerCLI.run(["network", "delete", networkName])
+        LiveTeardown.removeNetwork(networkName)
     }
 
     @Test("A non-external network is created, and the service actually attaches to it")

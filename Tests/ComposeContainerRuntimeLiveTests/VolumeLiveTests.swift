@@ -42,6 +42,11 @@ struct VolumeLiveTests {
         for volume in volumeNames {
             _ = try? ContainerCLI.run(["volume", "delete", volume])
         }
+        // The network each project brought up with it, which deleting the
+        // container and the volume both leave behind.
+        for project in projectNames {
+            LiveTeardown.removeProjectNetwork(project)
+        }
     }
 
     @Test("Two projects sharing a volume name get separate volumes and both start")

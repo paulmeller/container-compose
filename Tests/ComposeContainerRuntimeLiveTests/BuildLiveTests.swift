@@ -61,7 +61,7 @@ struct BuildLiveTests {
             _ = try? ContainerCLI.run(["delete", "--force", containerID])
             _ = try? ContainerCLI.run(["image", "delete", tag])
             for network in service.networks {
-                _ = try? ContainerCLI.run(["network", "delete", network])
+                LiveTeardown.removeNetwork(network)
             }
         }
         try await adapter.startContainer(id: containerID)
