@@ -92,7 +92,6 @@ extension RuntimeCapabilities {
             "shm_size": "--shm-size",
             "runtime": "--runtime",
             "mem_limit": "--memory",
-            "hostname": "--name",
         ],
         booleanFlags: [
             "privileged": "--privileged",
@@ -126,6 +125,15 @@ extension RuntimeCapabilities {
             "cpu_shares": "relative CPU weighting is not exposed; CPUs are allocated whole",
             "cpuset": "CPU pinning is not exposed",
             "links": "superseded by networks; service names already resolve",
+            "extra_hosts": "the runtime has no --add-host, and nothing reads this key; the project's /etc/hosts carries service addresses only",
+            // Was mapped to `--name`, which is not the same thing at all:
+            // that sets the container's identity, which `createContainer`
+            // has already set to <project>-<service>. A service declaring
+            // `hostname:` emitted a second --name, so the container came
+            // up under a name the plan did not know, and reconciliation
+            // could no longer find it. There is no --hostname flag to map
+            // to; the runtime derives the hostname from the container name.
+            "hostname": "the runtime has no hostname flag; a container's hostname is its name, <project>-<service>",
             "external_links": "attach both containers to a shared network instead",
             "expose": "informational in Compose; it carries no runtime effect",
             "volumes_from": "declare the volume on each service instead",
@@ -142,10 +150,6 @@ extension RuntimeCapabilities {
             "deploy": (
                 reason: "replicas, placement and update strategies are orchestrator concepts",
                 supported: ["resources.limits.cpus", "resources.limits.memory"]
-            ),
-            "extra_hosts": (
-                reason: "the runtime has no --add-host; entries are written into a generated /etc/hosts instead, which replaces the daemon's own file",
-                supported: ["hostname:ip", "hostname:host-gateway"]
             ),
         ]
     )

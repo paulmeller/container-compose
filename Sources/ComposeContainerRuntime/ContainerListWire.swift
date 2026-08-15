@@ -33,6 +33,15 @@ struct WirePublishedPort: Decodable {
 
 struct WireStatus: Decodable {
     let state: String
+    /// Per-network attachment, carrying the address the runtime assigned.
+    /// Populated only once a container is running: a created-but-stopped
+    /// container reports none, which is why service addresses can only be
+    /// recorded after `start` rather than planned ahead of it.
+    let networks: [WireStatusNetwork]?
+}
+
+struct WireStatusNetwork: Decodable {
+    let ipv4Address: String?
 }
 
 /// `container image list --format json`.

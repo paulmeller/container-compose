@@ -169,6 +169,12 @@ public struct ContainerRuntimeAdapter: RuntimeAdapter {
             // someone else's and deleting it would be wrong anyway.
             if (try? ContainerCLI.run(["network", "delete", name])) != nil { removed.append(name) }
         }
+        // The project's addresses die with its network. Left behind, the
+        // file would seed the next `up` with addresses the runtime has
+        // since handed to something else.
+        if let hosts = try? Self.hostsFile(projectName: projectName) {
+            try? FileManager.default.removeItem(at: hosts)
+        }
         return removed
     }
 
@@ -298,6 +304,96 @@ public struct ContainerRuntimeAdapter: RuntimeAdapter {
         try ContainerCLI.run(["image", "push", image])
     }
 
+    // MARK: - Service-name DNS
+
+    /// Compose's contract is that a service reaches its peers by *service*
+    /// name: `http://browser:9223`, `postgres://db:5432`. Apple's runtime
+    /// registers a container in DNS under its own name only
+    /// (`openclaw-browser.test`), and offers no `--network-alias`, no
+    /// `--add-host`, and no alias field on `--network` — so every
+    /// multi-service compose file following the contract failed to
+    /// resolve, with nowhere to express the alias.
+    ///
+    /// Mounts are the one lever the runtime does give, and a host file can
+    /// be bind-mounted over `/etc/hosts`. Each project gets one such file,
+    /// mounted into all of its containers, and a service's address is
+    /// written into it as that service starts.
+    ///
+    /// Why this works rather than merely appearing to: libc consults
+    /// `/etc/hosts` on every lookup, so a container started earlier
+    /// resolves a peer that starts later without being restarted, and one
+    /// shared file means every service sees every other. Addresses cannot
+    /// be known before `start` — a created container has none yet — which
+    /// is what rules out generating the file up front.
+    ///
+    /// This is not an embedded DNS server: a peer resolves once it has
+    /// started, not before. That is also true of Compose's own DNS, and
+    /// `depends_on` ordering is what makes it reliable either way.
+    static func hostsDirectory() throws -> URL {
+        let base = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/container-compose/hosts", isDirectory: true)
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        return base
+    }
+
+    static func hostsFile(projectName: String) throws -> URL {
+        try hostsDirectory().appendingPathComponent("\(projectName).hosts")
+    }
+
+    /// What every image expects to already be there. Written when the file
+    /// is first needed, so a container never starts against an `/etc/hosts`
+    /// with no `localhost` in it.
+    static let hostsPreamble = "127.0.0.1 localhost\n::1 localhost ip6-localhost ip6-loopback\n"
+
+    @discardableResult
+    func ensureHostsFile(projectName: String) throws -> URL {
+        let url = try Self.hostsFile(projectName: projectName)
+        if !FileManager.default.fileExists(atPath: url.path) {
+            try Self.hostsPreamble.write(to: url, atomically: true, encoding: .utf8)
+        }
+        return url
+    }
+
+    /// Record (or replace) one service's address. Replacing matters on a
+    /// re-`up`: the runtime hands out a different address each time, and a
+    /// stale line would resolve to something no longer there.
+    func recordServiceAddress(projectName: String, service: String, address: String) throws {
+        let url = try ensureHostsFile(projectName: projectName)
+        let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? Self.hostsPreamble
+        let kept = existing
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { line in
+                // Drop any earlier line naming this service, whatever
+                // address it carried. Matched on the name fields only, so a
+                // service called `localhost` cannot evict the preamble by
+                // colliding with an address.
+                let fields = line.split(separator: " ").dropFirst().map(String.init)
+                return !fields.contains(service)
+            }
+            .joined(separator: "\n")
+        var rebuilt = kept.isEmpty || kept.hasSuffix("\n") ? kept : kept + "\n"
+        rebuilt += "\(address) \(service) \(projectName)-\(service)\n"
+        try rebuilt.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    /// Read back where the runtime actually put a container. The labels are
+    /// the authority on which service it is: a project name may itself
+    /// contain a hyphen, so splitting the container name would be a guess.
+    func observedAddress(containerID: String) throws -> (project: String, service: String, address: String)? {
+        let result = try ContainerCLI.run(["inspect", containerID])
+        guard let data = result.stdout.data(using: .utf8),
+              let entries = try? JSONDecoder().decode([WireContainerEntry].self, from: data),
+              let entry = entries.first,
+              let labels = entry.configuration.labels,
+              let project = labels["com.docker.compose.project"],
+              let service = labels["com.docker.compose.service"],
+              let address = entry.status.networks?.compactMap({ $0.ipv4Address }).first
+        else { return nil }
+        // Addresses arrive in CIDR form; a hosts file wants the address only.
+        let bare = address.split(separator: "/").first.map(String.init) ?? address
+        return (project, service, bare)
+    }
+
     // MARK: - Lifecycle
 
     public func createContainer(for service: PlannedService, image: String, projectName: String) async throws -> String {
@@ -310,6 +406,18 @@ public struct ContainerRuntimeAdapter: RuntimeAdapter {
         }
         for port in service.ports { args.append(contentsOf: ["-p", port]) }
         for volume in service.volumes { args.append(contentsOf: ["-v", volume]) }
+        // Skipped outright when the compose file mounts its own
+        // /etc/hosts, rather than added alongside and left to argument
+        // order to resolve: the user's explicit mount wins, and which of
+        // two mounts on the same target the runtime would honour is not
+        // something to rely on.
+        let mountsOwnHosts = service.volumes.contains { volume in
+            volume.split(separator: ":").dropFirst().first.map(String.init) == "/etc/hosts"
+        }
+        if !mountsOwnHosts {
+            let hostsFile = try ensureHostsFile(projectName: projectName)
+            args.append(contentsOf: ["-v", "\(hostsFile.path):/etc/hosts"])
+        }
         for network in service.networks { args.append(contentsOf: ["--network", network]) }
         for (key, value) in service.labels.sorted(by: { $0.key < $1.key }) {
             // Compose-standard labels were already added above; anything else
@@ -339,6 +447,17 @@ public struct ContainerRuntimeAdapter: RuntimeAdapter {
 
     public func startContainer(id: String) async throws {
         try ContainerCLI.run(["start", id])
+        // Only now does the container have an address to publish to its
+        // peers. A failure to record one must not fail the start: the
+        // container is up and useful, and the cost is that peers cannot
+        // reach it by service name — worth a degraded run, not a failed one.
+        if let observed = try? observedAddress(containerID: id) {
+            try? recordServiceAddress(
+                projectName: observed.project,
+                service: observed.service,
+                address: observed.address
+            )
+        }
     }
 
     public func stopContainer(id: String) async throws {
