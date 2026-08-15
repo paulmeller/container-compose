@@ -34,7 +34,7 @@ public struct ProtocolRunner: Sendable {
     /// kept here rather than in Package.swift because it is the value the
     /// `version` command prints — a consumer checking whether the binary
     /// supports what it needs reads this, not the package manifest.
-    public static let version = "0.2.1"
+    public static let version = "0.2.2"
 
     private let adapter: RuntimeAdapter
     private let capabilities: RuntimeCapabilities
