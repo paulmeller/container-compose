@@ -401,6 +401,35 @@ public struct ContainerRuntimeAdapter: RuntimeAdapter {
     // MARK: - Lifecycle
 
     public func createContainer(for service: PlannedService, image: String, projectName: String) async throws -> String {
+        // Skipped outright when the compose file mounts its own
+        // /etc/hosts, rather than added alongside and left to argument
+        // order to resolve: the user's explicit mount wins, and which of
+        // two mounts on the same target the runtime would honour is not
+        // something to rely on.
+        let mountsOwnHosts = service.volumes.contains { volume in
+            volume.split(separator: ":").dropFirst().first.map(String.init) == "/etc/hosts"
+        }
+        let hostsPath = mountsOwnHosts ? nil : try ensureHostsFile(projectName: projectName).path
+
+        let args = Self.createArguments(
+            for: service, image: image, projectName: projectName, hostsPath: hostsPath
+        )
+        try ContainerCLI.run(args)
+        // `--name` makes the name the container's id, so there is no separate
+        // id to parse out of stdout.
+        return ProjectNaming.containerName(project: projectName, service: service.name)
+    }
+
+    /// The full `container create` argument vector for a service.
+    ///
+    /// Split out from `createContainer` so tests assert the argv the product
+    /// actually builds rather than one reconstructed by hand — the argument
+    /// order here is load-bearing and got it wrong silently (see
+    /// `CreateArgumentsTests`). `hostsPath` is `nil` when the service mounts
+    /// its own /etc/hosts; everything else is a pure function of the service.
+    static func createArguments(
+        for service: PlannedService, image: String, projectName: String, hostsPath: String?
+    ) -> [String] {
         let name = ProjectNaming.containerName(project: projectName, service: service.name)
         var args = ["create", "--name", name, "-l", "com.docker.compose.project=\(projectName)", "-l", "com.docker.compose.service=\(service.name)"]
         args.append(contentsOf: ["-l", "\(Self.configHashLabel)=\(service.configHash)"])
@@ -410,18 +439,7 @@ public struct ContainerRuntimeAdapter: RuntimeAdapter {
         }
         for port in service.ports { args.append(contentsOf: ["-p", port]) }
         for volume in service.volumes { args.append(contentsOf: ["-v", volume]) }
-        // Skipped outright when the compose file mounts its own
-        // /etc/hosts, rather than added alongside and left to argument
-        // order to resolve: the user's explicit mount wins, and which of
-        // two mounts on the same target the runtime would honour is not
-        // something to rely on.
-        let mountsOwnHosts = service.volumes.contains { volume in
-            volume.split(separator: ":").dropFirst().first.map(String.init) == "/etc/hosts"
-        }
-        if !mountsOwnHosts {
-            let hostsFile = try ensureHostsFile(projectName: projectName)
-            args.append(contentsOf: ["-v", "\(hostsFile.path):/etc/hosts"])
-        }
+        if let hostsPath { args.append(contentsOf: ["-v", "\(hostsPath):/etc/hosts"]) }
         for network in service.networks { args.append(contentsOf: ["--network", network]) }
         for (key, value) in service.labels.sorted(by: { $0.key < $1.key }) {
             // Compose-standard labels were already added above; anything else
@@ -437,16 +455,33 @@ public struct ContainerRuntimeAdapter: RuntimeAdapter {
             if let value = option.value { args.append(value) }
         }
 
-        args.append(image)
-        if let command = service.command { args.append(contentsOf: command) }
-        if let entrypoint = service.entrypoint, let first = entrypoint.first {
-            args.append(contentsOf: ["--entrypoint", first])
+        // `container create` is `[options] <image> [command...]`, so
+        // `--entrypoint` has to land before the image or the runtime takes it
+        // as the container's own argv and the image entrypoint still runs.
+        //
+        // The flag names a single executable, so a multi-element compose
+        // entrypoint splits: head becomes the flag, tail leads the argv.
+        var argv = service.command ?? []
+        var executable: String?
+        if let entrypoint = service.entrypoint {
+            if let head = entrypoint.first {
+                executable = head
+                argv = Array(entrypoint.dropFirst()) + argv
+            } else if let head = argv.first {
+                // `entrypoint: []` resets the image's, per the Compose spec.
+                // This runtime has no flag for "no entrypoint", so the
+                // command's own executable is promoted into the slot —
+                // without it the image entrypoint runs the command as
+                // arguments, which is the aws-cli failure this came from.
+                executable = head
+                argv = Array(argv.dropFirst())
+            }
         }
+        if let executable { args.append(contentsOf: ["--entrypoint", executable]) }
 
-        try ContainerCLI.run(args)
-        // `--name` makes the name the container's id, so there is no separate
-        // id to parse out of stdout.
-        return name
+        args.append(image)
+        args.append(contentsOf: argv)
+        return args
     }
 
     public func startContainer(id: String) async throws {

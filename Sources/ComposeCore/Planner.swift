@@ -336,8 +336,8 @@ public struct Planner: Sendable {
             name: name,
             image: image,
             build: build,
-            command: try stringList(raw["command"], allowScalar: true).map(interpolate),
-            entrypoint: try stringList(raw["entrypoint"], allowScalar: true).map(interpolate),
+            command: try argvList(raw["command"])?.map(interpolate),
+            entrypoint: try argvList(raw["entrypoint"])?.map(interpolate),
             environment: environment,
             ports: try stringList(raw["ports"]).map(interpolate),
             volumes: try stringList(raw["volumes"]).map(interpolate)
@@ -557,6 +557,75 @@ public struct Planner: Sendable {
     }
 
     // MARK: - Raw-value helpers
+
+    /// `command` / `entrypoint`, where absent and empty are different things.
+    ///
+    /// Everywhere else an unwritten key and an empty list mean the same, so
+    /// `stringList` flattens both to `[]`. Not here: an absent `entrypoint`
+    /// leaves the image's alone while `entrypoint: []` resets it, and the
+    /// runtime cannot tell those apart from `[]` alone. `nil` means the key
+    /// was not written.
+    ///
+    /// The list form is argv already and is passed through untouched. The
+    /// string form is lexed the way a shell would, so
+    /// `command: sh -c "echo hi"` is three arguments rather than one — the
+    /// single-argument reading reaches the image entrypoint as one blob and
+    /// fails there.
+    private func argvList(_ value: Any?) -> [String]? {
+        if value == nil { return nil }
+        if let list = value as? [Any] { return list.map { "\($0)" } }
+        if let scalar = value as? String { return Self.shellSplit(scalar) }
+        return nil
+    }
+
+    /// Splits a command line into arguments on unquoted whitespace, honouring
+    /// single quotes, double quotes and backslash escapes.
+    ///
+    /// Deliberately not `split(separator: " ")`: a quoted run is one argument,
+    /// and breaking it apart silently changes what the container runs.
+    static func shellSplit(_ line: String) -> [String] {
+        var arguments: [String] = []
+        var current = ""
+        // Distinguishes `""` (an intentional empty argument) from the gap
+        // between two arguments.
+        var started = false
+        var quote: Character?
+        var escaped = false
+
+        for character in line {
+            if escaped {
+                current.append(character)
+                escaped = false
+                continue
+            }
+            // A backslash is literal inside single quotes, an escape anywhere
+            // else — the same rule a POSIX shell applies.
+            if character == "\\", quote != "'" {
+                escaped = true
+                started = true
+                continue
+            }
+            if let open = quote {
+                if character == open { quote = nil } else { current.append(character) }
+                continue
+            }
+            if character == "'" || character == "\"" {
+                quote = character
+                started = true
+                continue
+            }
+            if character.isWhitespace {
+                if started { arguments.append(current) }
+                current = ""
+                started = false
+                continue
+            }
+            current.append(character)
+            started = true
+        }
+        if started { arguments.append(current) }
+        return arguments
+    }
 
     private func stringList(_ value: Any?, allowScalar: Bool = false) -> [String] {
         if let list = value as? [Any] { return list.map { "\($0)" } }
